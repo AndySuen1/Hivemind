@@ -77,6 +77,20 @@ export const memoryToolConfigSchema = z.object({
 });
 export type MemoryToolConfig = z.infer<typeof memoryToolConfigSchema>;
 
+// 对话记忆（喂给模型的会话连续性）：L1 近期逐字窗口 / L2 滚动摘要 / L4 历史检索。
+// 注意这与上面的 memoryToolConfigSchema（长期记忆文件工具）是两回事：
+//  · memory.enabled 管的是 bot 能否主动用 save_memory 等工具写跨会话 .md 文件；
+//  · conversationMemory 管的是「bot 还记得多久前的对话」，对所有 bot 都适用，不受 memory.enabled 约束。
+export const conversationMemoryConfigSchema = z.object({
+  // 近期逐字窗口的轮数（实际消息数 = ×2）。留空 → 回退全局 env BOT_HISTORY_TURNS（默认 20）。
+  windowTurns: z.number().int().positive().max(100).optional(),
+  // L2 滚动摘要：把滑出窗口的旧对话压成一段摘要注入 system prompt。
+  summaryEnabled: z.boolean().default(true),
+  // L4 历史检索：按关键词从历史消息召回相关片段注入。
+  retrievalEnabled: z.boolean().default(true),
+});
+export type ConversationMemoryConfig = z.infer<typeof conversationMemoryConfigSchema>;
+
 // Web Search 工具（Phase 1.5）：provider fallback 链。
 // - duckduckgo：内置抓取，无需 key、无需部署（默认免费保底）
 // - tavily / brave：商业 AI 搜索 API，质量好，各有免费额度，key 是全局凭证（keytar）
@@ -115,6 +129,7 @@ export const botToolsSchema = z.object({
   fs: fsToolConfigSchema.default({}),
   bash: bashToolConfigSchema.default({}),
   memory: memoryToolConfigSchema.default({}),
+  conversationMemory: conversationMemoryConfigSchema.default({}),
   webSearch: webSearchToolConfigSchema.default({}),
   claudeCode: claudeCodeToolConfigSchema.default({}),
 });
@@ -127,6 +142,7 @@ export const botToolsPartialSchema = z.object({
   fs: fsToolConfigSchema.partial().optional(),
   bash: bashToolConfigSchema.partial().optional(),
   memory: memoryToolConfigSchema.partial().optional(),
+  conversationMemory: conversationMemoryConfigSchema.partial().optional(),
   webSearch: webSearchToolConfigSchema.partial().optional(),
   claudeCode: claudeCodeToolConfigSchema.partial().optional(),
 });

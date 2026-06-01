@@ -3,6 +3,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import type { ModelMessage } from 'ai';
 import type {
   ObservSession,
   ObservRun,
@@ -158,6 +159,30 @@ export const observRepo = {
         : db.prepare('SELECT * FROM events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?').all(runId, opts.after, limit + 1)
     ) as EventRow[];
     return paginate(rows.map(rowToEvent), limit, (e) => e.seq);
+  },
+
+  /**
+   * L1 对话复原：取某 (bot, channel) 会话最近 `limit` 条消息，按时间正序，映射为可直接喂 LLM 的
+   * ModelMessage（仅 user/assistant 文本——messages 表本就不存 tool 消息，天然满足 history 文本不变量）。
+   * 用「内层 DESC 取最近 N + 外层 ASC 复正序」，走 idx_messages_session；空会话/无 session → []。
+   * 供 bot 重启后首条消息时把内存 history 从持久化数据复原，best-effort（调用方 try/catch 隔离）。
+   */
+  recentHistory(botId: string, channelId: string, limit: number): ModelMessage[] {
+    const n = clampLimit(limit, MAX_LIMIT);
+    const rows = getDb()
+      .prepare(
+        `SELECT role, content FROM (
+           SELECT role, content, created_at, id FROM messages
+           WHERE session_id = (SELECT id FROM sessions WHERE bot_id = ? AND channel_id = ?)
+           ORDER BY created_at DESC, id DESC LIMIT ?
+         ) ORDER BY created_at ASC, id ASC`
+      )
+      .all(botId, channelId, n) as { role: string; content: string }[];
+    return rows.map((r): ModelMessage =>
+      r.role === 'assistant'
+        ? { role: 'assistant', content: r.content }
+        : { role: 'user', content: r.content }
+    );
   },
 
   /** 记忆浏览（只读）：列出某 bot 的记忆条目 + MEMORY.md 索引原文。 */

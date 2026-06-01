@@ -5,6 +5,7 @@ import {
   fsToolConfigSchema,
   bashToolConfigSchema,
   memoryToolConfigSchema,
+  conversationMemoryConfigSchema,
   webSearchToolConfigSchema,
   claudeCodeToolConfigSchema,
 } from '@hivemind/shared';
@@ -147,6 +148,7 @@ function parseBotTools(raw: string): Bot['tools'] {
     fs: section(fsToolConfigSchema, o.fs),
     bash: section(bashToolConfigSchema, o.bash),
     memory: section(memoryToolConfigSchema, o.memory),
+    conversationMemory: section(conversationMemoryConfigSchema, o.conversationMemory),
     webSearch: section(webSearchToolConfigSchema, o.webSearch),
     claudeCode: section(claudeCodeToolConfigSchema, o.claudeCode),
   };
@@ -221,6 +223,7 @@ export const botRepo = {
           fs: { ...existing.tools.fs, ...(pt.fs ?? {}) },
           bash: { ...existing.tools.bash, ...(pt.bash ?? {}) },
           memory: { ...existing.tools.memory, ...(pt.memory ?? {}) },
+          conversationMemory: { ...existing.tools.conversationMemory, ...(pt.conversationMemory ?? {}) },
           webSearch: { ...existing.tools.webSearch, ...(pt.webSearch ?? {}) },
           claudeCode: { ...existing.tools.claudeCode, ...(pt.claudeCode ?? {}) },
         }

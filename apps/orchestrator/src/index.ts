@@ -5,7 +5,7 @@ import 'dotenv/config';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { initDb, closeDb } from './db.js';
-import { botManager } from './bot-manager.js';
+import { botManager, startConsolidationLoop } from './bot-manager.js';
 import { buildApi } from './api.js';
 import { recoverInterruptedRuns, startRetentionLoop } from './observ-retention.js';
 
@@ -14,8 +14,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.DB_PATH ?? join(__dirname, '..', '..', '..', 'data', 'app.db');
 const API_PORT = Number(process.env.API_PORT ?? 3001);
 
-// 保留清理定时器的停止句柄（shutdown 时清掉）。
+// 保留清理 / 记忆整理定时器的停止句柄（shutdown 时清掉）。
 let stopRetention: (() => void) | null = null;
+let stopConsolidation: (() => void) | null = null;
 
 async function main(): Promise<void> {
   console.log(`[boot] DB: ${DB_PATH}`);
@@ -31,6 +32,9 @@ async function main(): Promise<void> {
   // P7 数据保留：启动即清一次 + 周期清理（OBSERV_RETENTION_DAYS / _INTERVAL_HOURS）。
   stopRetention = startRetentionLoop();
 
+  // L3 记忆整理：后台周期把空闲会话的摘要固化进长期记忆（CONV_CONSOLIDATE_*）。
+  stopConsolidation = startConsolidationLoop();
+
   const app = buildApi();
   await app.listen({ port: API_PORT, host: '127.0.0.1' });
   console.log(`[boot] API 监听 http://127.0.0.1:${API_PORT}`);
@@ -44,6 +48,7 @@ main().catch((e) => {
 async function shutdown(signal: string): Promise<void> {
   console.log(`\n[shutdown] ${signal}`);
   stopRetention?.();
+  stopConsolidation?.();
   await botManager.stopAll();
   closeDb();
   process.exit(0);

@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import { tool, type Tool } from 'ai';
-import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
-const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const;
-type MemoryType = (typeof MEMORY_TYPES)[number];
+export const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const;
+export type MemoryType = (typeof MEMORY_TYPES)[number];
 
 const INDEX_FILE = 'MEMORY.md';
 
@@ -103,7 +103,7 @@ ${body.trim()}
 `;
 }
 
-function listMemoryMetas(dir: string): MemoryMeta[] {
+export function listMemoryMetas(dir: string): MemoryMeta[] {
   ensureDir(dir);
   const out: MemoryMeta[] = [];
   for (const f of readdirSync(dir)) {
@@ -153,6 +153,78 @@ export function loadMemoryIndexText(dir: string): string {
   } catch {
     return '';
   }
+}
+
+// ── 可编程写入入口（供 L3 自动整理 memory-consolidation.ts 使用）────────────────────────────
+// 复用与 save_memory 工具完全一致的 sanitize/slug/frontmatter/索引逻辑，继承全部注入与路径防护；
+// 自动整理绝不绕过这些直接写文件。
+
+export interface MemoryUpsert {
+  name: string;
+  description: string;
+  type: MemoryType;
+  content: string;
+}
+
+/** 写入（或按规范名覆盖）一条记忆并重建索引。等价于 save_memory 工具的写入路径。 */
+export function upsertMemory(dir: string, m: MemoryUpsert): void {
+  ensureDir(dir);
+  const canonical = sanitizeName(m.name);
+  const meta: MemoryMeta = { name: canonical, description: sanitizeDesc(m.description), type: m.type };
+  writeFileSync(memFilePath(dir, canonical), buildFileContent(meta, m.content), 'utf-8');
+  rebuildIndex(dir);
+}
+
+/** 按 name 删除一条记忆并重建索引。返回是否删到。 */
+export function deleteMemoryByName(dir: string, name: string): boolean {
+  const p = memFilePath(dir, name);
+  if (!existsSync(p)) return false;
+  rmSync(p);
+  rebuildIndex(dir);
+  return true;
+}
+
+/** 读取一条记忆的完整内容（含 frontmatter）。不存在/失败→null。 */
+export function loadMemoryBody(dir: string, name: string): string | null {
+  try {
+    const p = memFilePath(dir, name);
+    if (!existsSync(p)) return null;
+    return readFileSync(p, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 总量封顶：记忆条数超过 maxFacts 时，按文件 mtime 删最旧的若干条（LRU 淘汰），重建索引。
+ * upsert 会刷新 mtime，故近期更新/写入的记忆优先保留。返回被淘汰的 name 列表。maxFacts<=0 不淘汰。
+ */
+export function pruneMemoriesToCap(dir: string, maxFacts: number): string[] {
+  if (maxFacts <= 0) return [];
+  const entries = listMemoryEntries(dir);
+  if (entries.length <= maxFacts) return [];
+  const withMtime = entries.map((e) => {
+    let mtime = 0;
+    try {
+      mtime = statSync(join(dir, e.file)).mtimeMs;
+    } catch {
+      // 取不到时间视为最旧，优先淘汰
+    }
+    return { name: e.name, file: e.file, mtime };
+  });
+  withMtime.sort((a, b) => a.mtime - b.mtime); // 最旧在前
+  const toRemove = withMtime.slice(0, withMtime.length - maxFacts);
+  const removed: string[] = [];
+  for (const e of toRemove) {
+    try {
+      rmSync(join(dir, e.file));
+      removed.push(e.name);
+    } catch {
+      // 跳过删不掉的
+    }
+  }
+  if (removed.length) rebuildIndex(dir);
+  return removed;
 }
 
 /** 构建 5 个 memory 工具，全部作用于单个 bot 的 memoryDir */

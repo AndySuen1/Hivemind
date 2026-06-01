@@ -237,6 +237,11 @@ function BotForm(props: BotFormProps) {
   const [claudeEnabled, setClaudeEnabled] = useState(t?.claudeCode.enabled ?? false);
   const [claudeMaxTurns, setClaudeMaxTurns] = useState(t?.claudeCode.maxTurns ?? 30);
   const [claudeTimeoutMin, setClaudeTimeoutMin] = useState(Math.round((t?.claudeCode.timeoutMs ?? 1_200_000) / 60000));
+  // 对话记忆（窗口/摘要/检索）。windowTurns=0 表示用全局默认 BOT_HISTORY_TURNS。
+  // 用可选链兜底：旧 API 响应/旧库数据可能尚无 conversationMemory 段，缺失时退默认，绝不让表单崩。
+  const [convWindow, setConvWindow] = useState(t?.conversationMemory?.windowTurns ?? 0);
+  const [convSummary, setConvSummary] = useState(t?.conversationMemory?.summaryEnabled ?? true);
+  const [convRetrieval, setConvRetrieval] = useState(t?.conversationMemory?.retrievalEnabled ?? true);
 
   const selectedProvider = props.providers.find((p) => p.id === providerId);
   const [submitting, setSubmitting] = useState(false);
@@ -261,6 +266,11 @@ function BotForm(props: BotFormProps) {
           timeoutMs: bashTimeout,
         },
         memory: { enabled: memEnabled },
+        conversationMemory: {
+          summaryEnabled: convSummary,
+          retrievalEnabled: convRetrieval,
+          ...(convWindow > 0 ? { windowTurns: convWindow } : {}),
+        },
         webSearch: { enabled: webEnabled },
         claudeCode: {
           enabled: claudeEnabled,
@@ -455,6 +465,40 @@ function BotForm(props: BotFormProps) {
             <span className="text-sm font-medium">长期记忆 memory</span>
             <span className="text-[11px] text-zinc-400">跨会话，存于 bot-memory/&lt;botId&gt;/</span>
           </label>
+          {memEnabled && (
+            <div className="mt-1 text-[11px] text-zinc-500">
+              开启后，达一定轮数或会话空闲时会自动把对话要点「整理」固化进上面的长期记忆文件（合并去重、总量封顶）。
+            </div>
+          )}
+        </div>
+
+        {/* 对话记忆：窗口 / 摘要 / 检索（与长期记忆文件不同，管的是「还记得多久前的对话」） */}
+        <div className="rounded border border-zinc-200 bg-white p-3">
+          <div className="text-sm font-medium">对话记忆（会话连续性）</div>
+          <div className="mt-1 text-[11px] text-zinc-400">
+            决定 bot「还记得多久前的对话」。重启后会从历史自动复原。与上面的长期记忆文件是两套机制。
+          </div>
+          <div className="mt-2 space-y-2">
+            <label className="block">
+              <div className="mb-1 text-[11px] text-zinc-500">近期逐字窗口（轮数，0 = 用全局默认 BOT_HISTORY_TURNS=20）</div>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={convWindow}
+                onChange={(e) => setConvWindow(Number(e.target.value))}
+                className="w-32 rounded border border-zinc-300 px-3 py-2 text-xs"
+              />
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={convSummary} onChange={(e) => setConvSummary(e.target.checked)} />
+              <span className="text-xs">滚动摘要（把更早对话压缩成摘要，记住整段会话且省 token）</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={convRetrieval} onChange={(e) => setConvRetrieval(e.target.checked)} />
+              <span className="text-xs">历史检索（按当前提问从更早消息召回相关片段）</span>
+            </label>
+          </div>
         </div>
 
         {/* web search */}
