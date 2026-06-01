@@ -1,0 +1,30 @@
+{
+  "name": "@discord-agent-hub/orchestrator",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^1.0.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.158",
+    "@discord-agent-hub/shared": "workspace:*",
+    "@fastify/cors": "^10.0.1",
+    "ai": "^5.0.0",
+    "better-sqlite3": "^11.5.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.1.0",
+    "keytar": "^7.9.0",
+    "undici": "^6.21.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

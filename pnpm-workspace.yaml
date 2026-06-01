@@ -1,0 +1,10 @@
+packages:
+  - apps/*
+  - packages/*
+
+# 允许这些 native 模块的 postinstall 脚本运行
+allowBuilds:
+  esbuild: true
+  better-sqlite3: true
+  keytar: true
+  electron: true
