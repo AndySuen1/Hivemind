@@ -2,7 +2,7 @@
 
 通过 Discord 远程指挥本机 Claude Code 干活，多 bot / 多 LLM 协作平台。
 
-## 快速开始（Phase 0 单 bot 对话）
+## 快速开始
 
 ```bash
 # 1. 装依赖（首次）
@@ -56,23 +56,30 @@ pnpm dev:launcher   # 或 pnpm dev（不带托盘，仅两个服务）
 ```
 hivemind/
 ├── apps/
-│   └── orchestrator/       # Node.js 后端
-│       └── src/
-│           ├── index.ts    # 入口
-│           ├── bot.ts      # discord.js + LLM
-│           └── config.ts   # env 加载
-└── (后续 phase) apps/dashboard, packages/shared, data/, ...
+│   ├── orchestrator/   # Fastify 后端(:3001) — Discord bots + 工具 + Claude 委派 + 可观测埋点
+│   ├── dashboard/      # Next.js 管理网站(:3000) — Providers / Bots / 可观测 / 系统设置
+│   └── launcher/       # Electron 托盘启动器 — 一键启动 + 进程管家 + 本地控制 API
+├── packages/
+│   └── shared/         # 跨包 TS 类型与 Zod schema
+└── data/               # SQLite（app.db，已被 .gitignore 忽略）
 ```
 
-## Phase 进度
+## 进度
 
-- [x] Phase -1：版本检查、目录建立、ANTHROPIC_API_KEY 确认未设
-- [ ] Phase 0：单 DeepSeek bot 对话 MVP（当前）
-- [ ] Phase 1：fs / bash / memory 工具
-- [ ] Phase 1.5：Web Search (Tavily)
-- [ ] Phase 2：delegate_to_claude + 完整中转交互
-- [ ] Phase 3：多 bot + Inter-Agent + SQLite + keytar
+**已完成**
+- [x] Phase -1：版本检查、目录、确认未设 ANTHROPIC_API_KEY
+- [x] Phase 0：单 DeepSeek bot 对话 MVP
+- [x] Phase 1：fs / bash / memory 工具 + 多步 tool-calling 循环
+- [x] Phase 1.5：Web Search（多源自动兜底：DuckDuckGo / Tavily / Brave / SearXNG）
+- [x] Phase 2：delegate_to_claude —— DeepSeek 主脑按需委派 Claude Code 子进程，危险操作经 Discord 审批
+- [x] Phase 3（基础）：多 bot + SQLite + keytar 密钥存储
+- [x] Phase 4：Dashboard（Next.js）—— Providers / Bots / 系统设置
+- [x] 可观测性：聊天 / 执行追踪 / 记忆浏览 / Live 总览（SSE 实时）+ 历史清理与保留策略
+- [x] 桌面托盘启动器（Electron）—— 一键启动、托盘、端口/开机自启、配置导出导入
+- [x] 重命名为 Hivemind
+
+**待办**
+- [ ] Phase 3：Inter-Agent（bot 之间 @ 协作）
 - [ ] Phase 3.5：Skill 系统 + 调度器
-- [ ] Phase 4：Dashboard (Next.js)
 - [ ] Phase 4.5：RAG（可选）
-- [ ] Phase 5：完善 + 上线
+- [ ] Phase 5：免环境一键打包（standalone + 随包 Node + 代码签名）+ 上线
