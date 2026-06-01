@@ -245,7 +245,7 @@ function ConfigMigration() {
       const a = document.createElement('a');
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
       a.href = url;
-      a.download = `discord-agent-hub-config-${stamp}.json`;
+      a.download = `hivemind-config-${stamp}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();

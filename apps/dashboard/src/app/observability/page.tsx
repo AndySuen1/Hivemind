@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import type { LiveOverview } from '@discord-agent-hub/shared';
+import type { LiveOverview } from '@hivemind/shared';
 import { observApi } from '@/lib/api';
 import { BOT_STATUS_COLOR, fmtAgo } from '@/lib/observ-ui';
 

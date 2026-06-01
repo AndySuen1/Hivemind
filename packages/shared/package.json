@@ -1,5 +1,5 @@
 {
-  "name": "@discord-agent-hub/shared",
+  "name": "@hivemind/shared",
   "version": "0.0.1",
   "private": true,
   "type": "module",

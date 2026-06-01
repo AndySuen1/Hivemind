@@ -17,6 +17,7 @@ data/*.db-*
 data/logs/
 
 # 配置导出文件（可能含明文密钥，切勿提交）
+hivemind-config-*.json
 discord-agent-hub-config-*.json
 
 # OS

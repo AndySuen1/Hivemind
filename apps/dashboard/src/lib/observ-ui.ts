@@ -1,6 +1,6 @@
 // 可观测性 UI 的纯展示辅助：时间格式、状态/事件配色与图标、值预览。无 JSX。
 
-import type { ObservEventType, ObservRunStatus, BotRuntimeStatus } from '@discord-agent-hub/shared';
+import type { ObservEventType, ObservRunStatus, BotRuntimeStatus } from '@hivemind/shared';
 
 /** 绝对时间（本地，秒级）。 */
 export function fmtTime(ts: number): string {

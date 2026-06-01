@@ -3,7 +3,7 @@ import Link from 'next/link';
 export default function Home() {
   return (
     <div className="max-w-3xl">
-      <h2 className="mb-4 text-2xl font-bold">Discord Agent Hub</h2>
+      <h2 className="mb-4 text-2xl font-bold">Hivemind</h2>
       <p className="mb-6 text-zinc-600">
         本地多 bot 平台。先在 <Link href="/providers" className="text-blue-600 underline">Providers</Link> 添加一个模型供应商（如 DeepSeek），再在 <Link href="/bots" className="text-blue-600 underline">Bots</Link> 创建并启用一个 Discord bot。
       </p>

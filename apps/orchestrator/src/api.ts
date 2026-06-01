@@ -7,7 +7,7 @@ import {
   botCreateSchema,
   botUpdateSchema,
   webSearchProviderSchema,
-} from '@discord-agent-hub/shared';
+} from '@hivemind/shared';
 import { providerRepo, botRepo } from './repos.js';
 import { botManager } from './bot-manager.js';
 import { createLlmModel, generateReply } from './llm.js';

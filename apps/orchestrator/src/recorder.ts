@@ -20,7 +20,7 @@ import type {
   ObservRunStatus,
   ObservMessageRole,
   ObservUsage,
-} from '@discord-agent-hub/shared';
+} from '@hivemind/shared';
 import { getDb } from './db.js';
 import { redactText } from './redact.js';
 

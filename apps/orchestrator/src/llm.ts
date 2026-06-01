@@ -1,6 +1,6 @@
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText, stepCountIs, type LanguageModel, type ModelMessage, type ToolSet } from 'ai';
-import type { Provider } from '@discord-agent-hub/shared';
+import type { Provider } from '@hivemind/shared';
 import { providerRepo } from './repos.js';
 
 // 单次回复内最多允许的 step 数（每个工具调用回合算一步），防 DeepSeek 死循环

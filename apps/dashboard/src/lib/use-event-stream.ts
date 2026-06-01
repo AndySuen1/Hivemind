@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import type { ObservRecord } from '@discord-agent-hub/shared';
+import type { ObservRecord } from '@hivemind/shared';
 import { API_BASE } from './api';
 
 export interface StreamFilter {

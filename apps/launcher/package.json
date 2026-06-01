@@ -1,8 +1,8 @@
 {
-  "name": "@discord-agent-hub/launcher",
+  "name": "@hivemind/launcher",
   "version": "0.0.1",
   "private": true,
-  "description": "Discord Agent Hub 托盘启动器（Electron 壳；orchestrator/dashboard 以独立 Node 子进程 spawn，原生模块零重编译）",
+  "description": "Hivemind 托盘启动器（Electron 壳；orchestrator/dashboard 以独立 Node 子进程 spawn，原生模块零重编译）",
   "main": "dist-electron/main.js",
   "scripts": {
     "gen-icons": "node scripts/gen-icons.mjs",

@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Partials, type Message } from 'discord.js';
 import type { LanguageModel, ModelMessage } from 'ai';
-import type { Bot, BotRuntimeInfo } from '@discord-agent-hub/shared';
+import type { Bot, BotRuntimeInfo } from '@hivemind/shared';
 import { botRepo, providerRepo } from './repos.js';
 import { createLlmModel, generateAgentReply } from './llm.js';
 import { buildBotToolRuntime, composeSystemPrompt, type BotToolRuntime } from './tools/index.js';

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import type { Provider, ProviderCreate, ProviderUpdate } from '@discord-agent-hub/shared';
+import type { Provider, ProviderCreate, ProviderUpdate } from '@hivemind/shared';
 import { providersApi, webSearchApi } from '@/lib/api';
 
 export default function ProvidersPage() {

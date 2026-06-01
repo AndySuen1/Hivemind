@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { tool, type Tool } from 'ai';
 import { exec, execSync, type ChildProcess } from 'node:child_process';
-import type { BashToolConfig } from '@discord-agent-hub/shared';
+import type { BashToolConfig } from '@hivemind/shared';
 import { assertRealpathAllowed } from './path-guard.js';
 
 const MAX_OUTPUT_CHARS = 8000; // 单流截断，防 token 爆炸

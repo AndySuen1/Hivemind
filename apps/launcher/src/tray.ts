@@ -40,7 +40,7 @@ function summarize(st: StatusSnapshot): string {
 
 export function createTray(controller: LauncherController): Tray {
   const tray = new Tray(trayImage());
-  tray.setToolTip('Discord Agent Hub');
+  tray.setToolTip('Hivemind');
 
   const rebuild = (): void => {
     const st = controller.getStatus();
@@ -68,8 +68,8 @@ export function createTray(controller: LauncherController): Tray {
       { label: '退出', click: () => controller.quit() },
     ]);
     tray.setContextMenu(menu);
-    if (st.lastError) tray.setToolTip(`Discord Agent Hub — ${st.lastError}`);
-    else tray.setToolTip('Discord Agent Hub');
+    if (st.lastError) tray.setToolTip(`Hivemind — ${st.lastError}`);
+    else tray.setToolTip('Hivemind');
   };
 
   rebuild();

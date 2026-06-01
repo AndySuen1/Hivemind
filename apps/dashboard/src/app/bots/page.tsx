@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import type { BotCreate, BotUpdate, BotTools, Provider } from '@discord-agent-hub/shared';
-import { DEFAULT_DENY_PATTERNS } from '@discord-agent-hub/shared';
+import type { BotCreate, BotUpdate, BotTools, Provider } from '@hivemind/shared';
+import { DEFAULT_DENY_PATTERNS } from '@hivemind/shared';
 import { botsApi, providersApi, type BotWithRuntime } from '@/lib/api';
 
 const linesToArr = (s: string): string[] =>

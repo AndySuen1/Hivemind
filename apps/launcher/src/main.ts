@@ -8,7 +8,7 @@ import { startControlServer } from './control-server';
 import { createTray } from './tray';
 import type { LauncherController, PublicSettings, StatusSnapshot } from './types';
 
-// 显式设置应用名：避免 scoped 包名 "@discord-agent-hub/launcher" 污染 userData 目录与登录项标识。
+// 显式设置应用名：历史 app 名保持不变（仅包名改为 @hivemind/launcher）：userData(launcher.json：端口/token/自启) 与开机自启身份都绑定它，改了会作废现有配置。
 app.setName('discord-agent-hub-launcher');
 
 let tray: Tray | null = null;

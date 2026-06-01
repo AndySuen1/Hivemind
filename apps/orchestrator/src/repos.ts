@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Bot, BotCreate, BotUpdate, Provider, ProviderCreate, ProviderUpdate } from '@discord-agent-hub/shared';
+import type { Bot, BotCreate, BotUpdate, Provider, ProviderCreate, ProviderUpdate } from '@hivemind/shared';
 import {
   botToolsSchema,
   fsToolConfigSchema,
@@ -7,7 +7,7 @@ import {
   memoryToolConfigSchema,
   webSearchToolConfigSchema,
   claudeCodeToolConfigSchema,
-} from '@discord-agent-hub/shared';
+} from '@hivemind/shared';
 import { getDb } from './db.js';
 import { setSecret, getSecret, deleteSecret, secretAccount } from './secrets.js';
 

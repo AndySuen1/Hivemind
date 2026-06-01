@@ -3,7 +3,7 @@ import { tool, type Tool } from 'ai';
 import {
   type WebSearchProviderName,
   WEBSEARCH_PROVIDERS_NEEDING_KEY,
-} from '@discord-agent-hub/shared';
+} from '@hivemind/shared';
 
 const REQUEST_TIMEOUT_MS = 20000;
 const MAX_RESULTS_CAP = 10;

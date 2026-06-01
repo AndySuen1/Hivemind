@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ToolSet } from 'ai';
-import type { Bot } from '@discord-agent-hub/shared';
+import type { Bot } from '@hivemind/shared';
 import { buildFsTools } from './fs.js';
 import { buildBashTool } from './bash.js';
 import { buildMemoryTools, loadMemoryIndexText, MEMORY_SYSTEM_GUIDE } from './memory.js';

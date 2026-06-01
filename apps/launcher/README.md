@@ -1,4 +1,4 @@
-# @discord-agent-hub/launcher
+# @hivemind/launcher
 
 桌面托盘启动器（Electron 壳）。一键启动后驻留系统托盘，负责拉起 orchestrator 与 dashboard，
 并提供「打开管理网站 / 启停服务 / 开机自启 / 退出」。现支持 Windows，架构为将来移植 macOS 预留。

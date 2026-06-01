@@ -1,14 +1,14 @@
 {
-  "name": "discord-agent-hub",
+  "name": "hivemind",
   "version": "0.0.1",
   "private": true,
   "description": "Discord multi-agent platform: DeepSeek 主脑 + Claude Code 工人",
   "scripts": {
     "dev": "pnpm --parallel --filter \"./apps/*\" dev",
-    "dev:orchestrator": "pnpm --filter @discord-agent-hub/orchestrator dev",
-    "dev:dashboard": "pnpm --filter @discord-agent-hub/dashboard dev",
-    "dev:launcher": "pnpm --filter @discord-agent-hub/launcher dev",
-    "build:launcher": "pnpm --filter @discord-agent-hub/launcher build",
+    "dev:orchestrator": "pnpm --filter @hivemind/orchestrator dev",
+    "dev:dashboard": "pnpm --filter @hivemind/dashboard dev",
+    "dev:launcher": "pnpm --filter @hivemind/launcher dev",
+    "build:launcher": "pnpm --filter @hivemind/launcher build",
     "start": "pnpm --parallel --filter \"./apps/*\" start"
   },
   "engines": {

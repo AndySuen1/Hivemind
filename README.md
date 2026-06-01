@@ -1,4 +1,4 @@
-# discord-agent-hub
+# Hivemind
 
 通过 Discord 远程指挥本机 Claude Code 干活，多 bot / 多 LLM 协作平台。
 
@@ -34,7 +34,7 @@ pnpm dev:launcher
 
 ```bash
 git clone <你的仓库地址>
-cd discord-agent-hub
+cd hivemind
 pnpm install        # 重新下载 electron + 就地重编原生模块（better-sqlite3 / keytar）
 pnpm dev:launcher   # 或 pnpm dev（不带托盘，仅两个服务）
 ```
@@ -54,7 +54,7 @@ pnpm dev:launcher   # 或 pnpm dev（不带托盘，仅两个服务）
 ## 目录
 
 ```
-discord-agent-hub/
+hivemind/
 ├── apps/
 │   └── orchestrator/       # Node.js 后端
 │       └── src/

@@ -10,7 +10,7 @@ import type {
   ObservCursor,
   ObservMemoryEntry,
   ObservRecord,
-} from '@discord-agent-hub/shared';
+} from '@hivemind/shared';
 import { observApi, botsApi, type BotWithRuntime } from '@/lib/api';
 import { useEventStream } from '@/lib/use-event-stream';
 import {

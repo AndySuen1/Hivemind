@@ -16,7 +16,7 @@ import type {
   ObservCursor,
   ObservMemoryEntry,
   ObservMemoryList,
-} from '@discord-agent-hub/shared';
+} from '@hivemind/shared';
 import { getDb } from './db.js';
 import { getBotMemoryDir } from './tools/index.js';
 import { listMemoryEntries, loadMemoryIndexText } from './tools/memory.js';

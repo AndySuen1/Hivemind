@@ -3,7 +3,7 @@ import Link from 'next/link';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Discord Agent Hub',
+  title: 'Hivemind',
   description: 'Multi-bot Discord agent platform',
 };
 
@@ -13,7 +13,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-screen bg-zinc-50 text-zinc-900">
         <div className="flex min-h-screen">
           <aside className="w-56 border-r border-zinc-200 bg-white p-4">
-            <h1 className="mb-6 text-lg font-bold">Agent Hub</h1>
+            <h1 className="mb-6 text-lg font-bold">Hivemind</h1>
             <nav className="space-y-1">
               <NavItem href="/">概览</NavItem>
               <NavItem href="/providers">Providers</NavItem>

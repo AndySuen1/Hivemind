@@ -10,7 +10,7 @@ importers:
 
   apps/dashboard:
     dependencies:
-      '@discord-agent-hub/shared':
+      '@hivemind/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       clsx:
@@ -71,12 +71,12 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.158
         version: 0.3.158(@anthropic-ai/sdk@0.100.1(zod@3.25.76))(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))(zod@3.25.76)
-      '@discord-agent-hub/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
       '@fastify/cors':
         specifier: ^10.0.1
         version: 10.1.0
+      '@hivemind/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       ai:
         specifier: ^5.0.0
         version: 5.0.193(zod@3.25.76)

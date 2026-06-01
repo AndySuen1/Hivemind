@@ -5,7 +5,7 @@
 // 因 hijack 绕过了 @fastify/cors 的响应钩子，需**手动补 CORS 头**；心跳保活；断开时清理订阅与定时器。
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { ObservRecord } from '@discord-agent-hub/shared';
+import type { ObservRecord } from '@hivemind/shared';
 import { recorder } from './recorder.js';
 import { allowedOrigins } from './cors-origins.js';
 

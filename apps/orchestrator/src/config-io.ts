@@ -1,8 +1,8 @@
 // 配置导出/导入：用于在机器间迁移 providers/bots（及可选密钥）。
 // providers/bots 存 SQLite、密钥存 keytar，这里统一打包成一个 JSON。
 // 关键：保留 id —— 既维持 bot.providerId 引用，也让密钥账户（按 id 命名）在导入后正确对应。
-import type { Bot, Provider } from '@discord-agent-hub/shared';
-import { botToolsSchema } from '@discord-agent-hub/shared';
+import type { Bot, Provider } from '@hivemind/shared';
+import { botToolsSchema } from '@hivemind/shared';
 import { getDb } from './db.js';
 import { providerRepo, botRepo } from './repos.js';
 import { getSecret, setSecret, secretAccount } from './secrets.js';

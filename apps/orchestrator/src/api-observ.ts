@@ -3,7 +3,7 @@
 // 沿用 ok/data 信封 + before/beforeId/limit（events 用 after）游标分页。注册到主 Fastify 实例（见 api.ts）。
 
 import type { FastifyInstance } from 'fastify';
-import type { LiveOverviewBot } from '@discord-agent-hub/shared';
+import type { LiveOverviewBot } from '@hivemind/shared';
 import { observRepo } from './observ-repo.js';
 import { deleteSession, deleteBotHistory, purgeByRetentionStrict, RETENTION_DAYS } from './observ-retention.js';
 import { botRepo } from './repos.js';

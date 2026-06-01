@@ -1,5 +1,6 @@
 import keytar from 'keytar';
 
+// 历史值，勿改：本机钥匙串里已存密钥（token/API key）都挂在这个 service 名下，改了会全部失联。
 const SERVICE = 'discord-agent-hub';
 
 export async function setSecret(account: string, value: string): Promise<void> {

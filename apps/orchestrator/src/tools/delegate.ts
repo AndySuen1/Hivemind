@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { tool, type Tool } from 'ai';
-import type { ClaudeCodeToolConfig } from '@discord-agent-hub/shared';
+import type { ClaudeCodeToolConfig } from '@hivemind/shared';
 import { assertRealpathAllowed } from './path-guard.js';
 import { tryAcquireDelegationSlot } from '../claude/concurrency.js';
 import { runDelegation, getLastSession, sessionKey } from '../claude/delegation.js';
