@@ -3,6 +3,9 @@ import type {
   BotCreate,
   BotRuntimeInfo,
   BotUpdate,
+  Project,
+  ProjectCreate,
+  ProjectUpdate,
   Provider,
   ProviderCreate,
   ProviderUpdate,
@@ -68,6 +71,21 @@ export const botsApi = {
 };
 
 // ============================================================
+// Projects（Inter-Agent 协作分组）
+// ============================================================
+export type ProjectWithMembers = Project & { memberBotIds: string[] };
+
+export const projectsApi = {
+  list: () => call<ProjectWithMembers[]>('/api/projects'),
+  get: (id: string) => call<ProjectWithMembers>(`/api/projects/${id}`),
+  create: (input: ProjectCreate) =>
+    call<ProjectWithMembers>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
+  update: (id: string, patch: ProjectUpdate) =>
+    call<ProjectWithMembers>(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  delete: (id: string) => call<{ id: string }>(`/api/projects/${id}`, { method: 'DELETE' }),
+};
+
+// ============================================================
 // 可观测性查询（P4 路由）
 // ============================================================
 function qs(params: Record<string, string | number | undefined>): string {
@@ -129,11 +147,13 @@ export interface ConfigBundle {
   exportedAt: number;
   includesSecrets: boolean;
   providers: unknown[];
+  projects?: unknown[];
   bots: unknown[];
   webSearch?: unknown[];
 }
 export interface ImportResult {
   providers: number;
+  projects: number;
   bots: number;
   secrets: number;
   errors: string[];

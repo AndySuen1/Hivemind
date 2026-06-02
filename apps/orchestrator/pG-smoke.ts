@@ -6,7 +6,7 @@
 // 熔断阈值在 router 模块加载时读 env，故必须先设再动态 import。
 process.env.INTERAGENT_DAILY_USD_CAP = '5';
 
-import { botToolsSchema, botToolsPartialSchema, observEventTypeSchema, mentionBotToolConfigSchema } from '@hivemind/shared';
+import { observEventTypeSchema } from '@hivemind/shared';
 
 let pass = 0, fail = 0;
 function check(name: string, cond: boolean, extra?: unknown): void {
@@ -22,24 +22,7 @@ const CH = 'chan-1';
 
 // ============================================================
 console.log('— schema —');
-{
-  const t = botToolsSchema.parse({});
-  check('botToolsSchema 默认含 mentionBot.enabled=false', t.mentionBot.enabled === false);
-  check('mentionBot 默认 canMention=[]', Array.isArray(t.mentionBot.canMention) && t.mentionBot.canMention.length === 0);
-  check('mentionBot 默认 maxTurnsPerTask=6', t.mentionBot.maxTurnsPerTask === 6);
-  check('mentionBot 默认 maxCostUsd=2', t.mentionBot.maxCostUsd === 2);
-
-  // PATCH 深度可选：只传 maxTurnsPerTask 不应带出 canMention（保证 repos 合并能保留旧值）
-  const p = botToolsPartialSchema.parse({ mentionBot: { maxTurnsPerTask: 3 } });
-  check('partial 只传 maxTurnsPerTask → 不含 canMention', p.mentionBot !== undefined && !('canMention' in (p.mentionBot as object)));
-
-  // 模拟 repos.update 的 section 合并：旧值 canMention 应保留
-  const existing = botToolsSchema.parse({}).mentionBot;
-  const merged = mentionBotToolConfigSchema.parse({ ...existing, ...(p.mentionBot ?? {}), canMention: [B] });
-  check('合并后 maxTurnsPerTask=3 且 canMention 保留', merged.maxTurnsPerTask === 3 && merged.canMention.includes(B));
-
-  check("observEventType 含 'mention'", observEventTypeSchema.safeParse('mention').success);
-}
+check("observEventType 含 'mention'", observEventTypeSchema.safeParse('mention').success);
 
 // ============================================================
 console.log('— 短循环检测 isShortLoop —');

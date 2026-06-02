@@ -123,20 +123,8 @@ export const claudeCodeToolConfigSchema = z.object({
 });
 export type ClaudeCodeToolConfig = z.infer<typeof claudeCodeToolConfigSchema>;
 
-// Inter-Agent 协作工具（Phase 3）：mention_bot。bot 调 mention_bot(bot_name, message) 把子任务
-// 转交给同频道的另一个**被授权**的 bot；转交通过在频道里真实 @对方（对方的消息处理接力）发生，
-// 由 Inter-Agent Router 做白名单 / 预算 / 短循环检测 / 暂停-恢复管控（见 inter-agent/router.ts）。
-// 转交是**异步即发即走**：mention_bot 立刻返回任务号，对方在频道里接力，不阻塞调用方。
-export const mentionBotToolConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  // 允许 @ 的目标 bot **id** 白名单（访问控制，非名称——名称可重复/可改）。空 = 谁都不能 @。
-  canMention: z.array(z.string()).default([]),
-  // 单条协作任务（一条 @ 链）允许的最大转交跳数，防失控级联 / 互相 @ 刷额度。达到即暂停等人裁决。
-  maxTurnsPerTask: z.number().int().positive().max(20).default(6),
-  // 单条任务累计的最大成本（USD，主要来自链内 Claude 委派的等价订阅成本）。0 = 不按成本限。达到即暂停。
-  maxCostUsd: z.number().nonnegative().max(100).default(2),
-});
-export type MentionBotToolConfig = z.infer<typeof mentionBotToolConfigSchema>;
+// 注：Phase 3「Inter-Agent 协作（mention_bot）」不再是 per-bot 工具配置——改由「项目」分组驱动：
+// 同一项目（bot.projectId 相同）的 bot 自动可互相 @，转交预算挂在项目上（见 projectSchema 与 inter-agent/）。
 
 export const botToolsSchema = z.object({
   // fs / bash / claudeCode 共用的工作目录白名单：fs 的访问边界 + bash 与 Claude 子进程的起始 cwd。只填一次。
@@ -147,7 +135,6 @@ export const botToolsSchema = z.object({
   conversationMemory: conversationMemoryConfigSchema.default({}),
   webSearch: webSearchToolConfigSchema.default({}),
   claudeCode: claudeCodeToolConfigSchema.default({}),
-  mentionBot: mentionBotToolConfigSchema.default({}),
 });
 export type BotTools = z.infer<typeof botToolsSchema>;
 
@@ -161,7 +148,6 @@ export const botToolsPartialSchema = z.object({
   conversationMemory: conversationMemoryConfigSchema.partial().optional(),
   webSearch: webSearchToolConfigSchema.partial().optional(),
   claudeCode: claudeCodeToolConfigSchema.partial().optional(),
-  mentionBot: mentionBotToolConfigSchema.partial().optional(),
 });
 export type BotToolsPartial = z.infer<typeof botToolsPartialSchema>;
 
@@ -180,6 +166,8 @@ export const botSchema = z.object({
   temperature: z.number().min(0).max(2).default(1.3),
   tools: botToolsSchema.default({}),
   allowedRequesters: z.array(z.string()).default([]),
+  // 所属项目（Inter-Agent 协作分组）。null = 不在任何项目，无法跨 bot 协作。同项目的 bot 自动可互相 @。
+  projectId: z.string().nullable().default(null),
   enabled: z.boolean().default(false),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
@@ -203,6 +191,36 @@ export const botUpdateSchema = botSchema
     tools: botToolsPartialSchema.optional(),
   });
 export type BotUpdate = z.infer<typeof botUpdateSchema>;
+
+// ============================================================
+// Project（Inter-Agent 协作分组：把一组员工 bot 圈在一起，同项目内自动可互相 @）
+// ============================================================
+
+export const projectSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1).max(50),
+  description: z.string().max(500).default(''),
+  // 转交预算（一个项目一套，成员 bot 继承）：单条协作任务的最大转交跳数 / 累计成本上限（USD，0=不限）。
+  maxTurnsPerTask: z.number().int().positive().max(20).default(6),
+  maxCostUsd: z.number().nonnegative().max(100).default(2),
+  createdAt: z.number().int(),
+  updatedAt: z.number().int(),
+});
+export type Project = z.infer<typeof projectSchema>;
+
+// memberBotIds 是「虚拟」字段：不存在 projects 表，而是把每个列出的 bot 的 project_id 设为本项目
+//（全量重设——未列出的现有成员会被移出）。由 projectRepo 落到 bots.project_id。
+export const projectCreateSchema = projectSchema
+  .omit({ id: true, createdAt: true, updatedAt: true })
+  .partial({ description: true, maxTurnsPerTask: true, maxCostUsd: true })
+  .extend({ memberBotIds: z.array(z.string()).optional() });
+export type ProjectCreate = z.infer<typeof projectCreateSchema>;
+
+export const projectUpdateSchema = projectSchema
+  .omit({ id: true, createdAt: true, updatedAt: true })
+  .partial()
+  .extend({ memberBotIds: z.array(z.string()).optional() });
+export type ProjectUpdate = z.infer<typeof projectUpdateSchema>;
 
 // ============================================================
 // API 响应包装

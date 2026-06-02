@@ -6,9 +6,11 @@ import {
   providerUpdateSchema,
   botCreateSchema,
   botUpdateSchema,
+  projectCreateSchema,
+  projectUpdateSchema,
   webSearchProviderSchema,
 } from '@hivemind/shared';
-import { providerRepo, botRepo } from './repos.js';
+import { providerRepo, botRepo, projectRepo } from './repos.js';
 import { botManager } from './bot-manager.js';
 import { createLlmModel, generateReply } from './llm.js';
 import { runTestSearch } from './tools/web-search.js';
@@ -165,6 +167,7 @@ export function buildApi(): FastifyInstance {
     // 运行中的 BotInstance 在构造时捕获了 bot 快照（含 systemPrompt/temperature/tools/
     // allowedRequesters），这些字段改了必须重启实例才会生效——否则 dashboard 改了不起作用，
     // 尤其 allowedRequesters 是访问控制，不重启会留下“以为已改、实则未改”的安全空窗。
+    const projectChanged = before.projectId !== updated.projectId;
     const needsRestart =
       (before.enabled !== updated.enabled) ||
       patch.discordToken !== undefined ||
@@ -172,7 +175,9 @@ export function buildApi(): FastifyInstance {
       patch.systemPrompt !== undefined ||
       patch.temperature !== undefined ||
       patch.tools !== undefined ||
-      patch.allowedRequesters !== undefined;
+      patch.allowedRequesters !== undefined ||
+      patch.name !== undefined ||
+      projectChanged;
 
     if (needsRestart) {
       if (updated.enabled) {
@@ -180,6 +185,11 @@ export function buildApi(): FastifyInstance {
       } else {
         botManager.stop(id).catch((e) => app.log.error(`[bot ${id}] stop failed: ${e.message}`));
       }
+    }
+    // 改了项目归属 / 启停 / 改名，都会变同项目同伴的「可协作名单（含名字）/ mention_bot 装配」——重启同伴刷新。
+    // （同项目内成员的 mention_bot 是否装配 + 提示里的同伴名字，都在同伴实例启动时按当时的成员快照算定。）
+    if (projectChanged || before.enabled !== updated.enabled || patch.name !== undefined) {
+      restartProjectPeers([before.projectId, updated.projectId], id);
     }
 
     return { ok: true, data: { ...updated, runtime: botManager.getStatus(id) } };
@@ -197,6 +207,8 @@ export function buildApi(): FastifyInstance {
     const { id } = req.params as { id: string };
     try {
       await botManager.start(id);
+      // 上线后同项目同伴应把它纳入可协作名单 → 刷新同伴
+      restartProjectPeers([botRepo.get(id)?.projectId], id);
       return { ok: true, data: botManager.getStatus(id) };
     } catch (e) {
       return reply.code(500).send({ ok: false, error: (e as Error).message });
@@ -205,8 +217,91 @@ export function buildApi(): FastifyInstance {
 
   app.post('/api/bots/:id/stop', async (req) => {
     const { id } = req.params as { id: string };
+    const projectId = botRepo.get(id)?.projectId;
     await botManager.stop(id);
+    // 下线后同项目同伴应把它移出可协作名单 → 刷新同伴
+    restartProjectPeers([projectId], id);
     return { ok: true, data: botManager.getStatus(id) };
+  });
+
+  // ============================================================
+  // Project（Inter-Agent 协作分组）：同项目的 bot 自动可互相 @；预算挂项目
+  // ============================================================
+
+  // 重启一批 bot（仅启用中的）。成员/项目归属变更后用——刷新其「同伴名单 + mention_bot 工具装配」。
+  const restartBots = (ids: Iterable<string>): void => {
+    for (const bid of new Set(ids)) {
+      const b = botRepo.get(bid);
+      if (b?.enabled) botManager.restart(bid).catch((e) => app.log.error(`[bot ${bid}] restart failed: ${e.message}`));
+    }
+  };
+  // 重启给定项目们的成员（可排除某个 bot——它通常已单独重启），用于「某 bot 改了项目归属」时刷新新旧项目同伴。
+  const restartProjectPeers = (projectIds: (string | null | undefined)[], exceptId?: string): void => {
+    const ids = new Set<string>();
+    for (const pid of projectIds) {
+      if (!pid) continue;
+      for (const b of botRepo.listByProject(pid)) if (b.id !== exceptId) ids.add(b.id);
+    }
+    restartBots(ids);
+  };
+
+  app.get('/api/projects', async () => {
+    const projects = projectRepo.list();
+    // 附带成员 id，便于前端直接渲染成员勾选
+    return {
+      ok: true,
+      data: projects.map((p) => ({ ...p, memberBotIds: botRepo.listByProject(p.id).map((b) => b.id) })),
+    };
+  });
+
+  app.get('/api/projects/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = projectRepo.get(id);
+    if (!p) return reply.code(404).send({ ok: false, error: '项目不存在' });
+    return { ok: true, data: { ...p, memberBotIds: botRepo.listByProject(id).map((b) => b.id) } };
+  });
+
+  app.post('/api/projects', async (req) => {
+    const input = projectCreateSchema.parse(req.body);
+    // 捕获将被拉入成员的 bot 的「原项目」——它们原项目的剩余同伴也要刷新
+    const wanted = input.memberBotIds ?? [];
+    const oldProjects = wanted.map((bid) => botRepo.get(bid)?.projectId).filter((p): p is string => !!p);
+    const created = projectRepo.create(input);
+    if (wanted.length) {
+      const ids = new Set<string>([...wanted, ...botRepo.listByProject(created.id).map((b) => b.id)]);
+      for (const pid of oldProjects) for (const b of botRepo.listByProject(pid)) ids.add(b.id);
+      restartBots(ids);
+    }
+    return { ok: true, data: { ...created, memberBotIds: botRepo.listByProject(created.id).map((b) => b.id) } };
+  });
+
+  app.patch('/api/projects/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const patch = projectUpdateSchema.parse(req.body);
+    const membersChanged = patch.memberBotIds !== undefined;
+    // 改成员前先记下：本项目当前成员（含将被移出的）+ 被拉入 bot 的原项目（其剩余同伴要刷新）
+    const beforeMembers = membersChanged ? projectRepo.listMembers(id).map((b) => b.id) : [];
+    const oldProjects = membersChanged
+      ? (patch.memberBotIds ?? []).map((bid) => botRepo.get(bid)?.projectId).filter((p): p is string => !!p && p !== id)
+      : [];
+    const updated = projectRepo.update(id, patch);
+    if (!updated) return reply.code(404).send({ ok: false, error: '项目不存在' });
+    // 预算/名称改动无需重启（转交时实时读项目预算）；仅成员变更才刷新相关 bot。
+    if (membersChanged) {
+      const ids = new Set<string>([...beforeMembers, ...projectRepo.listMembers(id).map((b) => b.id)]);
+      for (const pid of oldProjects) for (const b of botRepo.listByProject(pid)) ids.add(b.id);
+      restartBots(ids);
+    }
+    return { ok: true, data: { ...updated, memberBotIds: projectRepo.listMembers(id).map((b) => b.id) } };
+  });
+
+  app.delete('/api/projects/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const members = projectRepo.listMembers(id).map((b) => b.id); // 删项目会把它们 project_id 置 NULL
+    const ok = projectRepo.delete(id);
+    if (!ok) return reply.code(404).send({ ok: false, error: '项目不存在' });
+    restartBots(members); // 失去项目 → 失去 mention_bot 工具，需重启刷新
+    return { ok: true, data: { id } };
   });
 
   // ============================================================

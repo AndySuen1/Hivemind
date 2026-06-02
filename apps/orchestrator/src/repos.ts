@@ -1,5 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import type { Bot, BotCreate, BotUpdate, Provider, ProviderCreate, ProviderUpdate } from '@hivemind/shared';
+import type {
+  Bot,
+  BotCreate,
+  BotUpdate,
+  Provider,
+  ProviderCreate,
+  ProviderUpdate,
+  Project,
+  ProjectCreate,
+  ProjectUpdate,
+} from '@hivemind/shared';
 import {
   botToolsSchema,
   fsToolConfigSchema,
@@ -8,7 +18,6 @@ import {
   conversationMemoryConfigSchema,
   webSearchToolConfigSchema,
   claudeCodeToolConfigSchema,
-  mentionBotToolConfigSchema,
 } from '@hivemind/shared';
 import { getDb } from './db.js';
 import { setSecret, getSecret, deleteSecret, secretAccount } from './secrets.js';
@@ -104,6 +113,7 @@ type BotRow = {
   temperature: number;
   tools: string;
   allowed_requesters: string;
+  project_id: string | null;
   enabled: number;
   created_at: number;
   updated_at: number;
@@ -152,7 +162,6 @@ function parseBotTools(raw: string): Bot['tools'] {
     conversationMemory: section(conversationMemoryConfigSchema, o.conversationMemory),
     webSearch: section(webSearchToolConfigSchema, o.webSearch),
     claudeCode: section(claudeCodeToolConfigSchema, o.claudeCode),
-    mentionBot: section(mentionBotToolConfigSchema, o.mentionBot),
   };
 }
 
@@ -164,6 +173,7 @@ const rowToBot = (r: BotRow): Bot => ({
   temperature: r.temperature,
   tools: parseBotTools(r.tools),
   allowedRequesters: JSON.parse(r.allowed_requesters),
+  projectId: r.project_id ?? null,
   enabled: r.enabled === 1,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -193,8 +203,8 @@ export const botRepo = {
     const tools = botToolsSchema.parse(input.tools ?? {});
     getDb()
       .prepare(
-        `INSERT INTO bots (id, name, provider_id, system_prompt, temperature, tools, allowed_requesters, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO bots (id, name, provider_id, system_prompt, temperature, tools, allowed_requesters, project_id, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -204,6 +214,7 @@ export const botRepo = {
         input.temperature ?? 1.3,
         JSON.stringify(tools),
         JSON.stringify(input.allowedRequesters ?? []),
+        input.projectId ?? null,
         input.enabled ? 1 : 0,
         now,
         now
@@ -228,14 +239,13 @@ export const botRepo = {
           conversationMemory: { ...existing.tools.conversationMemory, ...(pt.conversationMemory ?? {}) },
           webSearch: { ...existing.tools.webSearch, ...(pt.webSearch ?? {}) },
           claudeCode: { ...existing.tools.claudeCode, ...(pt.claudeCode ?? {}) },
-          mentionBot: { ...existing.tools.mentionBot, ...(pt.mentionBot ?? {}) },
         }
       : existing.tools;
     const tools = botToolsSchema.parse(mergedTools);
     getDb()
       .prepare(
         `UPDATE bots
-           SET name = ?, provider_id = ?, system_prompt = ?, temperature = ?, tools = ?, allowed_requesters = ?, enabled = ?, updated_at = ?
+           SET name = ?, provider_id = ?, system_prompt = ?, temperature = ?, tools = ?, allowed_requesters = ?, project_id = ?, enabled = ?, updated_at = ?
          WHERE id = ?`
       )
       .run(
@@ -245,6 +255,7 @@ export const botRepo = {
         updated.temperature,
         JSON.stringify(tools),
         JSON.stringify(updated.allowedRequesters),
+        updated.projectId ?? null,
         updated.enabled ? 1 : 0,
         updated.updatedAt,
         id
@@ -266,5 +277,120 @@ export const botRepo = {
 
   async getDiscordToken(id: string): Promise<string | null> {
     return getSecret(secretAccount.botDiscordToken(id));
+  },
+
+  /** 某项目的所有成员 bot（project_id 匹配）。 */
+  listByProject(projectId: string): Bot[] {
+    const rows = getDb().prepare('SELECT * FROM bots WHERE project_id = ? ORDER BY created_at').all(projectId) as BotRow[];
+    return rows.map(rowToBot);
+  },
+};
+
+// ============================================================
+// Project Repo（Inter-Agent 协作分组）
+// ============================================================
+
+type ProjectRow = {
+  id: string;
+  name: string;
+  description: string;
+  max_turns_per_task: number;
+  max_cost_usd: number;
+  created_at: number;
+  updated_at: number;
+};
+
+const rowToProject = (r: ProjectRow): Project => ({
+  id: r.id,
+  name: r.name,
+  description: r.description,
+  maxTurnsPerTask: r.max_turns_per_task,
+  maxCostUsd: r.max_cost_usd,
+  createdAt: r.created_at,
+  updatedAt: r.updated_at,
+});
+
+export const projectRepo = {
+  list(): Project[] {
+    const rows = getDb().prepare('SELECT * FROM projects ORDER BY created_at').all() as ProjectRow[];
+    return rows.map(rowToProject);
+  },
+
+  get(id: string): Project | null {
+    const row = getDb().prepare('SELECT * FROM projects WHERE id = ?').get(id) as ProjectRow | undefined;
+    return row ? rowToProject(row) : null;
+  },
+
+  create(input: ProjectCreate): Project {
+    const id = randomUUID();
+    const now = Date.now();
+    getDb()
+      .prepare(
+        `INSERT INTO projects (id, name, description, max_turns_per_task, max_cost_usd, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(id, input.name, input.description ?? '', input.maxTurnsPerTask ?? 6, input.maxCostUsd ?? 2, now, now);
+    if (input.memberBotIds) this.setMembers(id, input.memberBotIds);
+    return this.get(id)!;
+  },
+
+  update(id: string, patch: ProjectUpdate): Project | null {
+    const existing = this.get(id);
+    if (!existing) return null;
+    const updated = { ...existing, ...patch, updatedAt: Date.now() };
+    getDb()
+      .prepare(
+        `UPDATE projects
+           SET name = ?, description = ?, max_turns_per_task = ?, max_cost_usd = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .run(updated.name, updated.description, updated.maxTurnsPerTask, updated.maxCostUsd, updated.updatedAt, id);
+    if (patch.memberBotIds) this.setMembers(id, patch.memberBotIds);
+    return this.get(id);
+  },
+
+  /** 删项目：先把成员 bot 的 project_id 置 NULL（无硬 FK，应用层兜底，避免悬挂引用），再删项目行。 */
+  delete(id: string): boolean {
+    const db = getDb();
+    db.prepare('UPDATE bots SET project_id = NULL WHERE project_id = ?').run(id);
+    return db.prepare('DELETE FROM projects WHERE id = ?').run(id).changes > 0;
+  },
+
+  /**
+   * 全量重设成员：把列出的 bot 的 project_id 设为本项目；本项目原有但未列出的成员被移出（project_id 置 NULL）。
+   * 一个 bot 只属一个项目——把某 bot 加进本项目，自动把它从原属项目移出（UPDATE 覆盖 project_id）。
+   * 返回「受影响的 bot id 集合」（新增/移出/换项目者本身）。
+   * ⚠️ 该集合**不含**「被拉入 bot 原属项目里剩余的同伴」（它们的同伴名单也变了、同样需刷新）——
+   *    调用方须自行在变更前捕获被拉入 bot 的原项目并补刷其成员（见 api.ts 项目路由的做法）。不要把本返回值
+   *    直接喂给 restartBots 当作「该重启谁」的完整答案。
+   */
+  setMembers(id: string, memberBotIds: string[]): string[] {
+    const db = getDb();
+    const wanted = new Set(memberBotIds);
+    const current = new Set(this.listMembers(id).map((b) => b.id));
+    const affected = new Set<string>();
+    // 移出：原成员里不在 wanted 的
+    for (const botId of current) {
+      if (!wanted.has(botId)) {
+        db.prepare('UPDATE bots SET project_id = NULL, updated_at = ? WHERE id = ?').run(Date.now(), botId);
+        affected.add(botId);
+      }
+    }
+    // 加入/改属：wanted 里 project_id 不是本项目的（含原属别的项目的——会被覆盖移出原项目）
+    for (const botId of wanted) {
+      const bot = botRepo.get(botId);
+      if (!bot) continue; // 跳过不存在的 id
+      if (bot.projectId !== id) {
+        if (bot.projectId) affected.add(/* 它原属项目的同伴稍后由上层一并刷新 */ botId);
+        db.prepare('UPDATE bots SET project_id = ?, updated_at = ? WHERE id = ?').run(id, Date.now(), botId);
+        affected.add(botId);
+      }
+    }
+    return [...affected];
+  },
+
+  /** 项目当前成员（project_id 匹配）。 */
+  listMembers(id: string): Bot[] {
+    return botRepo.listByProject(id);
   },
 };

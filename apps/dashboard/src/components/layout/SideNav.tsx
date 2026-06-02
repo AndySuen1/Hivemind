@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Boxes, Bot, Activity, Settings, type LucideIcon } from 'lucide-react';
+import { LayoutDashboard, Boxes, Bot, FolderKanban, Activity, Settings, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const NAV: { href: string; label: string; icon: LucideIcon }[] = [
   { href: '/', label: '概览', icon: LayoutDashboard },
   { href: '/providers', label: 'Providers', icon: Boxes },
   { href: '/bots', label: 'Bots', icon: Bot },
+  { href: '/projects', label: '项目', icon: FolderKanban },
   { href: '/observability', label: '监控', icon: Activity },
   { href: '/settings', label: '设置', icon: Settings },
 ];

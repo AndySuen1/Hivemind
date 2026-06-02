@@ -247,7 +247,7 @@ function ConfigMigration() {
       a.remove();
       URL.revokeObjectURL(url);
       setMsg(
-        `✅ 已导出 ${bundle.providers.length} 个 provider、${bundle.bots.length} 个 bot` +
+        `✅ 已导出 ${bundle.providers.length} 个 provider、${bundle.projects?.length ?? 0} 个项目、${bundle.bots.length} 个 bot` +
           (includeSecrets ? '（含明文密钥，请妥善保管、勿入 git）' : '（不含密钥）'),
       );
     } catch (e) {
@@ -265,7 +265,7 @@ function ConfigMigration() {
       const bundle = JSON.parse(await file.text());
       const r = await configApi.import(bundle);
       setMsg(
-        `✅ 导入完成：provider ${r.providers}、bot ${r.bots}、密钥 ${r.secrets}` +
+        `✅ 导入完成：provider ${r.providers}、项目 ${r.projects}、bot ${r.bots}、密钥 ${r.secrets}` +
           (r.errors.length ? `；${r.errors.length} 条出错：${r.errors.join('；')}` : ''),
       );
     } catch (e) {

@@ -1,10 +1,10 @@
 // 配置导出/导入：用于在机器间迁移 providers/bots（及可选密钥）。
 // providers/bots 存 SQLite、密钥存 keytar，这里统一打包成一个 JSON。
 // 关键：保留 id —— 既维持 bot.providerId 引用，也让密钥账户（按 id 命名）在导入后正确对应。
-import type { Bot, Provider } from '@hivemind/shared';
+import type { Bot, Project, Provider } from '@hivemind/shared';
 import { botToolsSchema } from '@hivemind/shared';
 import { getDb } from './db.js';
-import { providerRepo, botRepo } from './repos.js';
+import { providerRepo, botRepo, projectRepo } from './repos.js';
 import { getSecret, setSecret, secretAccount } from './secrets.js';
 
 const WEB_KEY_PROVIDERS = ['tavily', 'brave'];
@@ -27,6 +27,8 @@ export interface ConfigBundle {
   exportedAt: number;
   includesSecrets: boolean;
   providers: ProviderExport[];
+  // 项目（Inter-Agent 协作分组）：含预算；导入时先于 bots upsert，使 bot.projectId 能解析到项目行。
+  projects?: Project[];
   bots: BotExport[];
   webSearch?: WebSearchExport[];
 }
@@ -38,6 +40,7 @@ export async function exportConfig(includeSecrets: boolean): Promise<ConfigBundl
     exportedAt: Date.now(),
     includesSecrets: includeSecrets,
     providers: [],
+    projects: projectRepo.list(),
     bots: [],
   };
 
@@ -77,6 +80,7 @@ export async function exportConfig(includeSecrets: boolean): Promise<ConfigBundl
 
 export interface ImportResult {
   providers: number;
+  projects: number;
   bots: number;
   secrets: number;
   errors: string[];
@@ -91,7 +95,7 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
   }
 
   const db = getDb();
-  const result: ImportResult = { providers: 0, bots: 0, secrets: 0, errors: [] };
+  const result: ImportResult = { providers: 0, projects: 0, bots: 0, secrets: 0, errors: [] };
   const now = Date.now();
 
   // providers 必须先于 bots（外键 bots.provider_id → providers.id）
@@ -124,18 +128,50 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
     }
   }
 
+  // projects 必须先于 bots（bots.project_id 引用项目；先 upsert 项目行，bot 的 projectId 才能解析、不悬挂）
+  const upsertProject = db.prepare(`
+    INSERT INTO projects (id, name, description, max_turns_per_task, max_cost_usd, created_at, updated_at)
+    VALUES (@id, @name, @description, @max_turns_per_task, @max_cost_usd, @created_at, @updated_at)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name, description = excluded.description,
+      max_turns_per_task = excluded.max_turns_per_task, max_cost_usd = excluded.max_cost_usd,
+      updated_at = excluded.updated_at
+  `);
+  if (Array.isArray(data.projects)) {
+    for (const pj of data.projects as Project[]) {
+      try {
+        if (!pj.id || !pj.name) throw new Error('字段缺失（id/name）');
+        upsertProject.run({
+          id: pj.id,
+          name: pj.name,
+          description: pj.description ?? '',
+          max_turns_per_task: pj.maxTurnsPerTask ?? 6,
+          max_cost_usd: pj.maxCostUsd ?? 2,
+          created_at: pj.createdAt ?? now,
+          updated_at: now,
+        });
+        result.projects++;
+      } catch (e) {
+        result.errors.push(`project「${pj.name ?? pj.id}」：${(e as Error).message}`);
+      }
+    }
+  }
+  const projectExists = db.prepare('SELECT 1 FROM projects WHERE id = ?');
+
   const upsertBot = db.prepare(`
-    INSERT INTO bots (id, name, provider_id, system_prompt, temperature, tools, allowed_requesters, enabled, created_at, updated_at)
-    VALUES (@id, @name, @provider_id, @system_prompt, @temperature, @tools, @allowed_requesters, @enabled, @created_at, @updated_at)
+    INSERT INTO bots (id, name, provider_id, system_prompt, temperature, tools, allowed_requesters, project_id, enabled, created_at, updated_at)
+    VALUES (@id, @name, @provider_id, @system_prompt, @temperature, @tools, @allowed_requesters, @project_id, @enabled, @created_at, @updated_at)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name, provider_id = excluded.provider_id, system_prompt = excluded.system_prompt,
       temperature = excluded.temperature, tools = excluded.tools, allowed_requesters = excluded.allowed_requesters,
-      enabled = excluded.enabled, updated_at = excluded.updated_at
+      project_id = excluded.project_id, enabled = excluded.enabled, updated_at = excluded.updated_at
   `);
   for (const b of data.bots as BotExport[]) {
     try {
       if (!b.id || !b.name || !b.providerId) throw new Error('字段缺失（id/name/providerId）');
       const tools = botToolsSchema.parse(b.tools ?? {});
+      // 项目不存在则置 NULL，避免把悬挂引用搬到新机器（同项目判定靠 project_id 相等，悬挂会误判同伴）
+      const projectId = b.projectId && projectExists.get(b.projectId) ? b.projectId : null;
       upsertBot.run({
         id: b.id,
         name: b.name,
@@ -144,6 +180,7 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
         temperature: b.temperature ?? 1.3,
         tools: JSON.stringify(tools),
         allowed_requesters: JSON.stringify(b.allowedRequesters ?? []),
+        project_id: projectId,
         enabled: b.enabled ? 1 : 0,
         created_at: b.createdAt ?? now,
         updated_at: now,

@@ -1,7 +1,7 @@
 import { Client, GatewayIntentBits, Partials, type Message } from 'discord.js';
 import type { LanguageModel, ModelMessage } from 'ai';
 import type { Bot, BotRuntimeInfo } from '@hivemind/shared';
-import { botRepo, providerRepo } from './repos.js';
+import { botRepo, providerRepo, projectRepo } from './repos.js';
 import { createLlmModel, generateAgentReply } from './llm.js';
 import { buildBotToolRuntime, composeSystemPrompt, type BotToolRuntime, type PromptExtras } from './tools/index.js';
 import type { DelegationContext } from './claude/delegation.js';
@@ -645,9 +645,15 @@ class BotManager {
       const now = Date.now();
       const fromInst = this.instances.get(fromCtx.botId);
       if (!fromInst) return { ok: false, reason: 'context_missing', message: '错误：发起 bot 已下线，无法转交。' };
-      const cfg = fromInst.getBot().tools.mentionBot;
 
-      // 0) 转交内容去掉 @ 后必须有实质内容（否则 B 侧 strip 后为空会被静默丢弃、链白白断掉）
+      // 0a) 发起方必须属于某个项目（协作范围 = 同项目）；项目预算用于开链
+      const callerProjectId = fromInst.getBot().projectId;
+      if (!callerProjectId)
+        return { ok: false, reason: 'context_missing', message: '错误：你还没有加入任何项目，无法 @ 其他 bot（请把你和同伴 bot 编进同一个项目）。' };
+      const project = projectRepo.get(callerProjectId);
+      if (!project) return { ok: false, reason: 'context_missing', message: '错误：你所属的项目已不存在。' };
+
+      // 0b) 转交内容去掉 @ 后必须有实质内容（否则 B 侧 strip 后为空会被静默丢弃、链白白断掉）
       const cleanMsg = args.message.replace(/<@!?\d+>/g, '').trim();
       if (!cleanMsg)
         return { ok: false, reason: 'context_missing', message: '错误：转交内容为空（去掉 @ 后没有实际内容）。请写清要对方做什么。' };
@@ -663,12 +669,12 @@ class BotManager {
           return { ok: false, reason: 'task_inactive', taskId: task.taskId, message: '错误：这条协作任务已暂停或结束，需发起人在频道里恢复后才能继续转交。' };
       }
 
-      // 2) 按名字解析目标（限定在 caller 的 canMention 白名单内、enabled）
-      const resolved = this.resolveMentionTarget(args.targetName, cfg.canMention);
+      // 2) 按名字解析目标（限定在**同项目**、enabled 的 bot 内）
+      const resolved = this.resolveMentionTarget(args.targetName, callerProjectId);
       if (resolved === 'not_found')
-        return { ok: false, reason: 'not_found', taskId: task?.taskId, message: `错误：没找到名为「${args.targetName}」的可协作 bot（确认名称无误、对方在你的协作授权名单内且已启用）。` };
-      if (resolved === 'not_authorized')
-        return { ok: false, reason: 'not_authorized', taskId: task?.taskId, message: `错误：你没有被授权 @「${args.targetName}」协作。` };
+        return { ok: false, reason: 'not_found', taskId: task?.taskId, message: `错误：没找到名为「${args.targetName}」的 bot（确认名称无误且对方已启用）。` };
+      if (resolved === 'not_in_project')
+        return { ok: false, reason: 'not_authorized', taskId: task?.taskId, message: `错误：「${args.targetName}」不在你的项目里，只能 @ 同项目的同伴 bot。` };
       const targetBot = resolved;
 
       // 3) 自指
@@ -692,8 +698,8 @@ class BotManager {
           rootRequesterId: root.rootRequesterId,
           rootBotId: root.rootBotId,
           channelId: root.channelId,
-          maxTurns: cfg.maxTurnsPerTask,
-          maxCostUsd: cfg.maxCostUsd,
+          maxTurns: project.maxTurnsPerTask,
+          maxCostUsd: project.maxCostUsd,
           now,
         });
         // 写回 taskId：args.chain === experimental_context.mention（同引用），本回合后续 mention_bot/delegate
@@ -790,15 +796,15 @@ class BotManager {
     return { ok: true, targetUserId: uid };
   }
 
-  /** 按名字（大小写不敏感）在 enabled bot 中解析目标，限定在 caller 的 canMention 白名单内；同名取最早创建。 */
-  private resolveMentionTarget(name: string, canMention: string[]): Bot | 'not_found' | 'not_authorized' {
+  /** 按名字（大小写不敏感）在 enabled bot 中解析目标，限定在**与发起方同项目**内；同名取最早创建。 */
+  private resolveMentionTarget(name: string, callerProjectId: string): Bot | 'not_found' | 'not_in_project' {
     const wanted = name.trim().toLowerCase();
     const matches = botRepo.listEnabled().filter((b) => b.name.trim().toLowerCase() === wanted);
     if (matches.length === 0) return 'not_found';
     matches.sort((a, b) => a.createdAt - b.createdAt);
-    const allowed = matches.filter((b) => canMention.includes(b.id));
-    if (allowed.length === 0) return 'not_authorized';
-    return allowed[0]!;
+    const sameProject = matches.filter((b) => b.projectId && b.projectId === callerProjectId);
+    if (sameProject.length === 0) return 'not_in_project';
+    return sameProject[0]!;
   }
 
   /** 登记 relay（发送前）→ 用发起 bot 的身份在频道里发 @ 消息 → 回填 messageId。成功 true，发送失败撤销登记返回 false。 */
@@ -891,7 +897,8 @@ class BotManager {
         await sendStatus(fromCtx.channel, `⚠️ 任务 #${short} 无法继续：${live.message}。任务保持暂停。`);
         return;
       }
-      const bumpTurns = this.instances.get(fromCtx.botId)?.getBot().tools.mentionBot.maxTurnsPerTask ?? 6;
+      const projId = this.instances.get(fromCtx.botId)?.getBot().projectId;
+      const bumpTurns = (projId ? projectRepo.get(projId)?.maxTurnsPerTask : undefined) ?? 6;
       const hop = interAgentRouter.resumeTask(taskId, bumpTurns, Date.now());
       if (!hop) return;
       // 用实时复核拿到的 userId/name 重建这一跳（防暂停期间对方改名/重连换 user）
