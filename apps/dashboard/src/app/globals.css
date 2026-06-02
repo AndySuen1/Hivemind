@@ -2,11 +2,81 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ===== 设计 Token：极简单色（shadcn/Linear/Vercel 调性）·亮色 ===== */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+
+  --bg: 0 0% 100%;            /* 内容底 纯白 */
+  --bg-subtle: 0 0% 98%;      /* #fafafa 侧栏/弱区 */
+  --bg-card: 0 0% 100%;       /* 卡片 白 */
+  --bg-hover: 240 5% 96%;     /* zinc-100 hover/选中底 */
+
+  --fg: 240 6% 10%;           /* 近黑 主文 */
+  --fg-muted: 240 4% 46%;     /* zinc-500 次文 */
+  --fg-subtle: 240 4% 64%;    /* zinc-400 辅助/禁用 */
+  --fg-inverse: 0 0% 100%;
+
+  --border: 240 6% 90%;       /* zinc-200 发丝边框 */
+  --border-strong: 240 5% 84%;/* zinc-300 */
+  --ring: 248 90% 66%;        /* 紫色强调——focus/选中 */
+
+  --primary: 248 90% 66%;         /* #7361f6 周边紫 强调色(选中/图标/链接) */
+  --primary-strong: 247 64% 55%;  /* #5b4ad1 深一档:主按钮(达 AA) */
+  --primary-hover: 247 64% 48%;   /* 按钮 hover */
+  --primary-fg: 0 0% 100%;
+  --primary-soft: 246 100% 97%;   /* #eeecfe 浅紫:选中/图标底 */
+
+  --success: 142 71% 45%; --success-fg: 142 64% 24%; --success-soft: 143 64% 96%;
+  --warning: 38 92% 50%;  --warning-fg: 32 74% 27%;  --warning-soft: 43 96% 95%;
+  --danger: 0 72% 51%;    --danger-fg: 0 70% 35%;    --danger-soft: 0 86% 97%;
+  --info: 239 84% 67%;    --info-fg: 243 54% 41%;    --info-soft: 240 100% 97%;
 }
 
-html, body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', Roboto, sans-serif;
+/* ===== 暗色预留：仅改变量，组件零改 ===== */
+.dark {
+  color-scheme: dark;
+  --bg: 240 10% 6%;
+  --bg-subtle: 240 6% 9%;
+  --bg-card: 240 6% 10%;
+  --bg-hover: 240 5% 14%;
+  --fg: 0 0% 96%;
+  --fg-muted: 240 5% 65%;
+  --fg-subtle: 240 5% 45%;
+  --border: 240 5% 18%;
+  --border-strong: 240 5% 24%;
+  --primary: 0 0% 98%;
+  --primary-strong: 0 0% 98%;
+  --primary-hover: 0 0% 88%;
+  --primary-fg: 240 6% 10%;
+  --primary-soft: 240 5% 16%;
+}
+
+/* ===== 基础层 ===== */
+@layer base {
+  html,
+  body {
+    margin: 0;
+  }
+  body {
+    @apply bg-bg text-fg font-sans text-base antialiased;
+  }
+  ::selection {
+    background: hsl(var(--ring) / 0.18);
+  }
+  :focus-visible {
+    outline: none;
+    @apply ring-2 ring-ring/40;
+  }
+}
+
+/* ===== 全局动效兜底：尊重系统「减少动态效果」 ===== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

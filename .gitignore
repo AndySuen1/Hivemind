@@ -11,6 +11,9 @@ dist/
 .vscode/
 .idea/
 
+# Claude Code 本地配置（含本机绝对路径与一次性权限规则，勿提交）
+.claude/
+
 # data（含 SQLite 主库与 WAL/shm/journal 旁文件）
 data/*.db
 data/*.db-*

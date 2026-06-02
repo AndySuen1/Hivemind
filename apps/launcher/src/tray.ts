@@ -48,11 +48,11 @@ export function createTray(controller: LauncherController): Tray {
     const allStopped = st.orchestrator === 'stopped' && st.dashboard === 'stopped';
 
     const menu = Menu.buildFromTemplate([
-      { label: `打开管理网站  (:${st.dashboardPort})`, click: () => controller.openDashboard() },
+      { label: '打开管理网站', click: () => controller.openDashboard() },
       { type: 'separator' },
       { label: summarize(st), enabled: false },
-      { label: `  orchestrator  ${stateLabel(st.orchestrator)}  :${st.apiPort}`, enabled: false },
-      { label: `  dashboard     ${stateLabel(st.dashboard)}  :${st.dashboardPort}`, enabled: false },
+      { label: `  orchestrator  ${stateLabel(st.orchestrator)}`, enabled: false },
+      { label: `  dashboard     ${stateLabel(st.dashboard)}`, enabled: false },
       { type: 'separator' },
       { label: '启动服务', enabled: allStopped, click: () => void controller.startServices() },
       { label: '停止服务', enabled: anyRunning, click: () => void controller.stopServices() },

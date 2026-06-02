@@ -30,17 +30,17 @@ export function fmtDuration(ms?: number): string {
 }
 
 export const BOT_STATUS_COLOR: Record<BotRuntimeStatus, string> = {
-  online: 'bg-green-100 text-green-800',
-  connecting: 'bg-amber-100 text-amber-800',
-  offline: 'bg-zinc-100 text-zinc-600',
-  error: 'bg-red-100 text-red-800',
+  online: 'bg-success-soft text-success-fg',
+  connecting: 'bg-warning-soft text-warning-fg',
+  offline: 'bg-bg-subtle text-fg-muted',
+  error: 'bg-danger-soft text-danger-fg',
 };
 
 export const RUN_STATUS_COLOR: Record<ObservRunStatus, string> = {
-  running: 'bg-blue-100 text-blue-800',
-  ok: 'bg-green-100 text-green-800',
-  error: 'bg-red-100 text-red-800',
-  aborted: 'bg-zinc-200 text-zinc-700',
+  running: 'bg-info-soft text-info-fg',
+  ok: 'bg-success-soft text-success-fg',
+  error: 'bg-danger-soft text-danger-fg',
+  aborted: 'bg-bg-subtle text-fg-muted',
 };
 
 export const RUN_STATUS_LABEL: Record<ObservRunStatus, string> = {
@@ -55,7 +55,7 @@ export function runStatusLabel(s: string): string {
   return RUN_STATUS_LABEL[s as ObservRunStatus] ?? s;
 }
 export function runStatusColor(s: string): string {
-  return RUN_STATUS_COLOR[s as ObservRunStatus] ?? 'bg-zinc-100 text-zinc-600';
+  return RUN_STATUS_COLOR[s as ObservRunStatus] ?? 'bg-bg-subtle text-fg-muted';
 }
 
 interface EventMeta {
@@ -64,19 +64,19 @@ interface EventMeta {
   color: string; // tailwind 文本/边框基调
 }
 export const EVENT_META: Record<ObservEventType, EventMeta> = {
-  tool_call: { icon: '🔧', label: '工具调用', color: 'text-zinc-700' },
-  delegate_start: { icon: '🤖', label: '委派开始', color: 'text-indigo-700' },
-  delegate_step: { icon: '▸', label: '委派步', color: 'text-indigo-600' },
-  delegate_end: { icon: '🤖', label: '委派结束', color: 'text-indigo-700' },
-  permission_request: { icon: '🔐', label: '权限请求', color: 'text-amber-700' },
-  permission_decision: { icon: '🔐', label: '权限裁决', color: 'text-amber-700' },
-  ask_question: { icon: '❓', label: '反问', color: 'text-purple-700' },
-  error: { icon: '⚠️', label: '错误', color: 'text-red-700' },
-  rate_limit: { icon: '⏳', label: '限流', color: 'text-orange-700' },
+  tool_call: { icon: '🔧', label: '工具调用', color: 'text-fg' },
+  delegate_start: { icon: '🤖', label: '委派开始', color: 'text-info-fg' },
+  delegate_step: { icon: '▸', label: '委派步', color: 'text-info-fg' },
+  delegate_end: { icon: '🤖', label: '委派结束', color: 'text-info-fg' },
+  permission_request: { icon: '🔐', label: '权限请求', color: 'text-warning-fg' },
+  permission_decision: { icon: '🔐', label: '权限裁决', color: 'text-warning-fg' },
+  ask_question: { icon: '❓', label: '反问', color: 'text-info-fg' },
+  error: { icon: '⚠️', label: '错误', color: 'text-danger-fg' },
+  rate_limit: { icon: '⏳', label: '限流', color: 'text-warning-fg' },
 };
 
 export function eventMeta(type: string): EventMeta {
-  return EVENT_META[type as ObservEventType] ?? { icon: '•', label: type, color: 'text-zinc-700' };
+  return EVENT_META[type as ObservEventType] ?? { icon: '•', label: type, color: 'text-fg' };
 }
 
 /** 把任意值（已是脱敏/截断后的）转成简短可读字符串供 UI 预览。 */
@@ -99,17 +99,17 @@ export function statusDotColor(status?: string): string {
     case 'ok':
     case 'allow':
     case 'answered':
-      return 'bg-green-500';
+      return 'bg-success';
     case 'error':
     case 'deny':
-      return 'bg-red-500';
+      return 'bg-danger';
     case 'running':
     case 'pending':
-      return 'bg-blue-500';
+      return 'bg-info';
     case 'timeout':
     case 'aborted':
-      return 'bg-zinc-400';
+      return 'bg-fg-subtle';
     default:
-      return 'bg-zinc-300';
+      return 'bg-border-strong';
   }
 }

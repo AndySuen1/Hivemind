@@ -24,26 +24,55 @@ import {
   preview,
   statusDotColor,
 } from '@/lib/observ-ui';
+import {
+  Button,
+  ListPanel,
+  PageContainer,
+  PageHeader,
+  Skeleton,
+  Tabs,
+  useConfirm,
+  useTabs,
+  useToast,
+  type TabItem,
+} from '@/components/ui';
+import { listEq } from '@/lib/shallow-eq';
+import { Activity, Brain, ListTree, MessageSquare, Trash2 } from 'lucide-react';
 
-type Tab = 'live' | 'chat' | 'trace' | 'memory';
-const TABS: { key: Tab; label: string }[] = [
-  { key: 'live', label: '实时' },
-  { key: 'chat', label: '聊天' },
-  { key: 'trace', label: '执行追踪' },
-  { key: 'memory', label: '记忆' },
+const TABS: TabItem[] = [
+  { key: 'live', label: '实时', icon: Activity },
+  { key: 'chat', label: '聊天', icon: MessageSquare },
+  { key: 'trace', label: '执行追踪', icon: ListTree },
+  { key: 'memory', label: '记忆', icon: Brain },
 ];
 
 export default function BotDetailPage({ params }: { params: { id: string } }) {
   const botId = params.id;
-  const [tab, setTab] = useState<Tab>('live');
+  const { value: tab, tabProps } = useTabs(TABS, { defaultKey: 'live', queryKey: 'tab' });
   const [bot, setBot] = useState<BotWithRuntime | null>(null);
   // 清空全部历史后自增：作为各 tab 的 key，强制重挂以清掉其内部缓存的会话/回合/feed 选择。
   const [reloadKey, setReloadKey] = useState(0);
   const [actionErr, setActionErr] = useState<string | null>(null);
+  const confirm = useConfirm();
 
   useEffect(() => {
     let alive = true;
-    const refresh = () => botsApi.get(botId).then((b) => alive && setBot(b)).catch(() => {});
+    const refresh = () =>
+      botsApi
+        .get(botId)
+        .then((b) => {
+          if (!alive) return;
+          // 内容相等短路：3s 轮询只关心运行态变化，避免无谓重渲染
+          setBot((prev) =>
+            prev &&
+            prev.runtime.status === b.runtime.status &&
+            prev.runtime.errorMessage === b.runtime.errorMessage &&
+            prev.enabled === b.enabled
+              ? prev
+              : b,
+          );
+        })
+        .catch(() => {});
     refresh();
     const t = setInterval(refresh, 3000);
     return () => {
@@ -53,7 +82,13 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
   }, [botId]);
 
   const clearAll = async () => {
-    if (!window.confirm(`清空 bot「${bot?.name ?? botId}」的全部会话 / 回合 / 消息 / 事件？此操作不可撤销。`)) return;
+    const ok = await confirm({
+      title: `清空 bot「${bot?.name ?? botId}」的全部历史？`,
+      description: '全部会话 / 回合 / 消息 / 事件将被删除，此操作不可撤销。',
+      confirmText: '清空',
+      danger: true,
+    });
+    if (!ok) return;
     setActionErr(null);
     try {
       await observApi.deleteBotHistory(botId);
@@ -64,43 +99,46 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
   };
 
   return (
-    <div className="max-w-5xl">
-      <div className="mb-1 text-xs text-zinc-400">
-        <Link href="/observability" className="hover:underline">可观测</Link> / bot
-      </div>
-      <div className="mb-4 flex items-center gap-3">
-        <h2 className="text-2xl font-bold">{bot?.name ?? botId}</h2>
-        {bot && <span className={`rounded px-2 py-0.5 text-xs ${BOT_STATUS_COLOR[bot.runtime.status]}`}>{bot.runtime.status}</span>}
-        <code className="text-[10px] text-zinc-400">{botId}</code>
-        <button
-          onClick={clearAll}
-          title="删除该 bot 的全部可观测历史"
-          className="ml-auto rounded border border-red-200 px-2 py-1 text-xs text-red-600 hover:bg-red-50"
-        >
-          🗑 清空全部历史
-        </button>
-      </div>
-      {actionErr && <div className="mb-3 rounded bg-red-50 p-2 text-xs text-red-700">清空失败：{actionErr}</div>}
+    <PageContainer size="wide">
+      <PageHeader
+        breadcrumb={
+          <>
+            <Link href="/observability" className="hover:underline">
+              监控
+            </Link>{' '}
+            / bot
+          </>
+        }
+        title={bot ? bot.name : <Skeleton className="h-8 w-48" />}
+        actions={
+          <>
+            {bot && (
+              <span className={`rounded px-2 py-0.5 text-xs ${BOT_STATUS_COLOR[bot.runtime.status]}`}>
+                {bot.runtime.status}
+              </span>
+            )}
+            <code className="text-[10px] text-fg-subtle">{botId}</code>
+            <Button
+              variant="danger"
+              size="sm"
+              leftIcon={<Trash2 className="size-4" />}
+              onClick={clearAll}
+              title="删除该 bot 的全部监控历史（会话 / 回合 / 消息 / 事件）"
+            >
+              清空全部历史
+            </Button>
+          </>
+        }
+      />
+      {actionErr && <div className="mb-3 rounded bg-danger-soft p-2 text-xs text-danger-fg">清空失败：{actionErr}</div>}
 
-      <div className="mb-4 flex gap-1 border-b border-zinc-200">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`-mb-px border-b-2 px-4 py-2 text-sm ${
-              tab === t.key ? 'border-blue-600 font-medium text-blue-700' : 'border-transparent text-zinc-500 hover:text-zinc-800'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <Tabs {...tabProps} className="mb-4" />
 
       {tab === 'live' && <LiveTab key={reloadKey} botId={botId} />}
       {tab === 'chat' && <ChatTab key={reloadKey} botId={botId} />}
       {tab === 'trace' && <TraceTab key={reloadKey} botId={botId} />}
       {tab === 'memory' && <MemoryTab botId={botId} />}
-    </div>
+    </PageContainer>
   );
 }
 
@@ -120,13 +158,20 @@ function SessionList({
 }) {
   const [sessions, setSessions] = useState<ObservSession[]>([]);
   const [loading, setLoading] = useState(true);
+  const confirm = useConfirm();
+  const { toast } = useToast();
 
   useEffect(() => {
     let alive = true;
     const refresh = async () => {
       try {
         const p = await observApi.sessions(botId, { limit: 100 });
-        if (alive) setSessions(p.items);
+        if (alive)
+          setSessions((prev) =>
+            listEq(prev, p.items, (s) => [s.id, s.title ?? '', s.channelName ?? '', Math.floor(s.lastActiveAt / 60000)])
+              ? prev
+              : p.items,
+          );
       } catch {
         /* ignore */
       } finally {
@@ -148,32 +193,41 @@ function SessionList({
   }, [sessions, selectedId]);
 
   const handleDelete = async (s: ObservSession) => {
-    if (!window.confirm(`清空会话「${s.title || s.channelName || s.channelId}」的全部消息 / 回合 / 事件？不可撤销。`)) return;
+    const ok = await confirm({
+      title: `清空会话「${s.title || s.channelName || s.channelId}」？`,
+      description: '该会话的全部消息 / 回合 / 事件将被删除，不可撤销。',
+      confirmText: '清空',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await observApi.deleteSession(s.id);
       setSessions((prev) => prev.filter((x) => x.id !== s.id));
       onDeleted?.(s.id);
     } catch (e) {
-      alert(`删除失败：${(e as Error).message}`);
+      toast(`删除失败：${(e as Error).message}`, { tone: 'danger' });
     }
   };
 
   return (
-    <div className="w-60 shrink-0 overflow-y-auto rounded border border-zinc-200 bg-white" style={{ maxHeight: '70vh' }}>
-      <div className="border-b border-zinc-100 px-3 py-2 text-xs font-medium text-zinc-500">会话（{sessions.length}）</div>
+    <ListPanel title="会话" count={sessions.length} className="w-full lg:w-60">
       {loading ? (
-        <div className="p-3 text-xs text-zinc-400">加载中…</div>
+        <div className="space-y-1 p-2">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <Skeleton key={i} className="h-11 rounded" />
+          ))}
+        </div>
       ) : sessions.length === 0 ? (
-        <div className="p-3 text-xs text-zinc-400">暂无会话</div>
+        <div className="p-3 text-xs text-fg-subtle">暂无会话</div>
       ) : (
         sessions.map((s) => (
           <div
             key={s.id}
-            className={`group flex items-stretch border-b border-zinc-50 ${selectedId === s.id ? 'bg-blue-50' : ''}`}
+            className={`group flex items-stretch border-b border-border ${selectedId === s.id ? 'bg-primary-soft' : ''}`}
           >
-            <button onClick={() => onSelect(s)} className="min-w-0 flex-1 px-3 py-2 text-left text-xs hover:bg-zinc-50">
-              <div className="truncate font-medium text-zinc-700">{s.title || s.channelName || s.channelId}</div>
-              <div className="mt-0.5 flex items-center justify-between text-[10px] text-zinc-400">
+            <button onClick={() => onSelect(s)} className="min-w-0 flex-1 px-3 py-2 text-left text-xs hover:bg-bg-hover">
+              <div className="truncate font-medium text-fg">{s.title || s.channelName || s.channelId}</div>
+              <div className="mt-0.5 flex items-center justify-between text-[10px] text-fg-subtle">
                 <span>{s.channelType ?? '?'}</span>
                 <span>{fmtTime(s.lastActiveAt)}</span>
               </div>
@@ -181,14 +235,14 @@ function SessionList({
             <button
               onClick={() => handleDelete(s)}
               title="清空此会话"
-              className="px-2 text-zinc-300 opacity-0 transition group-hover:opacity-100 hover:text-red-600"
+              className="px-2 text-fg-subtle opacity-0 transition group-hover:opacity-100 hover:text-danger"
             >
               ✕
             </button>
           </div>
         ))
       )}
-    </div>
+    </ListPanel>
   );
 }
 
@@ -198,14 +252,14 @@ function SessionList({
 function ChatTab({ botId }: { botId: string }) {
   const [session, setSession] = useState<ObservSession | null>(null);
   return (
-    <div className="flex gap-3">
+    <div className="flex flex-col gap-3 lg:flex-row">
       <SessionList
         botId={botId}
         selectedId={session?.id ?? null}
         onSelect={setSession}
         onDeleted={(id) => setSession((cur) => (cur?.id === id ? null : cur))}
       />
-      <div className="flex-1 min-w-0">
+      <div className="min-w-0 flex-1">
         {session ? <MessagesView key={session.id} sessionId={session.id} /> : <Empty text="选择一个会话查看聊天记录" />}
       </div>
     </div>
@@ -221,6 +275,9 @@ function MessagesView({ sessionId }: { sessionId: string }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   // 仅初始加载 / SSE 新消息时滚到底部；「加载更早」(stick=false) 不滚，否则旧消息一插入就被滚底拉走、功能形同虚设。
   const stickBottom = useRef(true);
+  // SSE 进场：独立 animatedIds(render 只读、effect 标记，StrictMode 安全)+ ready(首屏历史不播)
+  const animatedIds = useRef<Set<string>>(new Set());
+  const ready = useRef(false);
 
   // 统一入口：去重 + 按时间升序合并。fetch 历史与 SSE 实时都走这里，避免裸替换覆盖竞态先到的消息。
   const addMessages = useCallback((list: ObservMessage[], stick = true) => {
@@ -241,6 +298,8 @@ function MessagesView({ sessionId }: { sessionId: string }) {
         if (!alive) return;
         addMessages([...p.items].reverse());
         setOlderCursor(p.nextCursor);
+        for (const m of p.items) animatedIds.current.add(m.id); // 首屏历史不播进场
+        ready.current = true;
       })
       .catch((e) => alive && setErr((e as Error).message))
       .finally(() => alive && setLoading(false));
@@ -259,13 +318,18 @@ function MessagesView({ sessionId }: { sessionId: string }) {
   useEventStream({ sessionId }, onRec);
 
   useEffect(() => {
-    if (stickBottom.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [msgs.length]);
+    if (stickBottom.current) {
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      bottomRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth' });
+    }
+    for (const m of msgs) animatedIds.current.add(m.id); // 提交后标记，下次不再播
+  }, [msgs]);
 
   const loadOlder = async () => {
     if (olderCursor == null) return;
     try {
       const p = await observApi.messages(sessionId, { before: olderCursor.ts, beforeId: olderCursor.id, limit: 50 });
+      for (const m of p.items) animatedIds.current.add(m.id); // 加载更早的历史不播进场
       addMessages([...p.items].reverse(), false); // 历史插到顶部，不触发滚底
       setOlderCursor(p.nextCursor);
     } catch (e) {
@@ -274,31 +338,46 @@ function MessagesView({ sessionId }: { sessionId: string }) {
   };
 
   return (
-    <div className="flex flex-col rounded border border-zinc-200 bg-white" style={{ height: '70vh' }}>
+    <div className="flex h-[60vh] flex-col rounded border border-border bg-bg-card lg:h-panel">
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {olderCursor != null && (
-          <button onClick={loadOlder} className="mx-auto block rounded border border-zinc-200 px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-50">
+          <button onClick={loadOlder} className="mx-auto block rounded border border-border px-3 py-1 text-xs text-fg-muted hover:bg-bg-hover">
             ↑ 加载更早
           </button>
         )}
         {loading ? (
-          <div className="p-4 text-xs text-zinc-400">加载中…</div>
+          <div className="space-y-3">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className={`flex ${i % 2 === 0 ? 'justify-end' : 'justify-start'}`}>
+                <Skeleton className="h-12 w-[60%] rounded-lg" />
+              </div>
+            ))}
+          </div>
         ) : err ? (
-          <div className="p-3 text-xs text-red-600">{err}</div>
+          <div className="p-3 text-xs text-danger">{err}</div>
         ) : msgs.length === 0 ? (
           <Empty text="暂无消息" />
         ) : null}
-        {msgs.map((m) => (
-          <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-800'}`}>
-              <div className={`mb-0.5 text-[10px] ${m.role === 'user' ? 'text-blue-100' : 'text-zinc-400'}`}>
-                {m.role === 'user' ? m.authorName || '用户' : '助手'} · {fmtClock(m.createdAt)}
-                {m.truncated && ' · 已截断'}
+        {!loading &&
+          msgs.map((m) => {
+            const fresh = ready.current && !animatedIds.current.has(m.id);
+            return (
+              <div
+                key={m.id}
+                className={`${fresh ? 'animate-slide-up-in ' : ''}flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${m.role === 'user' ? 'bg-primary-strong text-white' : 'bg-bg-subtle text-fg'}`}
+                >
+                  <div className={`mb-0.5 text-[10px] ${m.role === 'user' ? 'text-primary-fg' : 'text-fg-subtle'}`}>
+                    {m.role === 'user' ? m.authorName || '用户' : '助手'} · {fmtClock(m.createdAt)}
+                    {m.truncated && ' · 已截断'}
+                  </div>
+                  <div className="whitespace-pre-wrap break-words">{m.content}</div>
+                </div>
               </div>
-              <div className="whitespace-pre-wrap break-words">{m.content}</div>
-            </div>
-          </div>
-        ))}
+            );
+          })}
         <div ref={bottomRef} />
       </div>
     </div>
@@ -312,7 +391,7 @@ function TraceTab({ botId }: { botId: string }) {
   const [session, setSession] = useState<ObservSession | null>(null);
   const [run, setRun] = useState<ObservRun | null>(null);
   return (
-    <div className="flex gap-3">
+    <div className="flex flex-col gap-3 lg:flex-row">
       <SessionList
         botId={botId}
         selectedId={session?.id ?? null}
@@ -333,9 +412,11 @@ function TraceTab({ botId }: { botId: string }) {
       {session ? (
         <RunsColumn key={session.id} sessionId={session.id} selectedRunId={run?.id ?? null} onSelect={setRun} />
       ) : (
-        <div className="flex-1"><Empty text="选择一个会话" /></div>
+        <div className="flex-1">
+          <Empty text="选择一个会话" />
+        </div>
       )}
-      <div className="flex-1 min-w-0">
+      <div className="min-w-0 flex-1">
         {run ? <EventsTimeline key={run.id} run={run} /> : <Empty text="选择一个回合查看事件时间线" />}
       </div>
     </div>
@@ -355,6 +436,8 @@ function RunsColumn({
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const byId = useRef<Map<string, ObservRun>>(new Map());
+  const animatedIds = useRef<Set<string>>(new Set());
+  const ready = useRef(false);
 
   const apply = useCallback((list: ObservRun[]) => {
     for (const r of list) byId.current.set(r.id, r);
@@ -364,12 +447,19 @@ function RunsColumn({
   useEffect(() => {
     let alive = true;
     byId.current = new Map();
+    animatedIds.current = new Set();
+    ready.current = false;
     setRuns([]);
     setLoading(true);
     setErr(null);
     observApi
       .runs(sessionId, { limit: 50 })
-      .then((p) => alive && apply(p.items))
+      .then((p) => {
+        if (!alive) return;
+        for (const r of p.items) animatedIds.current.add(r.id); // 首屏历史不播进场
+        apply(p.items);
+        ready.current = true;
+      })
       .catch((e) => alive && setErr((e as Error).message))
       .finally(() => alive && setLoading(false));
     return () => {
@@ -383,6 +473,11 @@ function RunsColumn({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runs, selectedRunId]);
 
+  // 提交后标记已见（同一 run 状态更新不重播；新 run 才播）
+  useEffect(() => {
+    for (const r of runs) animatedIds.current.add(r.id);
+  }, [runs]);
+
   // 实时：新回合 / 回合状态更新
   useEventStream(
     { sessionId },
@@ -395,34 +490,41 @@ function RunsColumn({
   );
 
   return (
-    <div className="w-56 shrink-0 overflow-y-auto rounded border border-zinc-200 bg-white" style={{ maxHeight: '70vh' }}>
-      <div className="border-b border-zinc-100 px-3 py-2 text-xs font-medium text-zinc-500">回合（{runs.length}）</div>
+    <ListPanel title="回合" count={runs.length} className="w-full lg:w-56">
       {loading ? (
-        <div className="p-3 text-xs text-zinc-400">加载中…</div>
+        <div className="space-y-1 p-2">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-12 rounded" />
+          ))}
+        </div>
       ) : err ? (
-        <div className="p-3 text-xs text-red-600">{err}</div>
+        <div className="p-3 text-xs text-danger">{err}</div>
       ) : runs.length === 0 ? (
-        <div className="p-3 text-xs text-zinc-400">暂无回合</div>
+        <div className="p-3 text-xs text-fg-subtle">暂无回合</div>
       ) : (
-        runs.map((r) => (
-          <button
-            key={r.id}
-            onClick={() => onSelect(r)}
-            className={`block w-full border-b border-zinc-50 px-3 py-2 text-left text-xs hover:bg-zinc-50 ${
-              selectedRunId === r.id ? 'bg-blue-50' : ''
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <span className={`rounded px-1.5 py-0.5 text-[10px] ${runStatusColor(r.status)}`}>{runStatusLabel(r.status)}</span>
-              <span className="text-[10px] text-zinc-400">{fmtClock(r.startedAt)}</span>
+        runs.map((r) => {
+          const fresh = ready.current && !animatedIds.current.has(r.id);
+          return (
+            <div key={r.id} className={fresh ? 'animate-enter-row' : ''}>
+              <button
+                onClick={() => onSelect(r)}
+                className={`block w-full border-b border-border px-3 py-2 text-left text-xs hover:bg-bg-hover ${
+                  selectedRunId === r.id ? 'bg-primary-soft' : ''
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${runStatusColor(r.status)}`}>{runStatusLabel(r.status)}</span>
+                  <span className="text-[10px] text-fg-subtle">{fmtClock(r.startedAt)}</span>
+                </div>
+                <div className="mt-1 text-[10px] text-fg-subtle">
+                  {r.toolCallCount} 个工具{r.usage?.totalTokens != null ? ` · ${r.usage.totalTokens} tok` : ''}
+                </div>
+              </button>
             </div>
-            <div className="mt-1 text-[10px] text-zinc-400">
-              {r.toolCallCount} 个工具{r.usage?.totalTokens != null ? ` · ${r.usage.totalTokens} tok` : ''}
-            </div>
-          </button>
-        ))
+          );
+        })
       )}
-    </div>
+    </ListPanel>
   );
 }
 
@@ -432,6 +534,8 @@ function EventsTimeline({ run }: { run: ObservRun }) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const seen = useRef<Set<string>>(new Set());
+  const animatedIds = useRef<Set<string>>(new Set());
+  const ready = useRef(false);
 
   const addAsc = useCallback((list: ObservEvent[]) => {
     const fresh = list.filter((e) => !seen.current.has(e.id));
@@ -443,6 +547,8 @@ function EventsTimeline({ run }: { run: ObservRun }) {
   useEffect(() => {
     let alive = true;
     seen.current = new Set();
+    animatedIds.current = new Set();
+    ready.current = false;
     setEvents([]);
     setLoading(true);
     setErr(null);
@@ -450,8 +556,10 @@ function EventsTimeline({ run }: { run: ObservRun }) {
       .events(run.id, { limit: 200 })
       .then((p) => {
         if (!alive) return;
+        for (const e of p.items) animatedIds.current.add(e.id); // 首屏历史不播进场
         addAsc(p.items);
         setAfter(p.nextCursor);
+        ready.current = true;
       })
       .catch((e) => alive && setErr((e as Error).message))
       .finally(() => alive && setLoading(false));
@@ -469,6 +577,11 @@ function EventsTimeline({ run }: { run: ObservRun }) {
       [addAsc]
     )
   );
+
+  // 提交后标记已见
+  useEffect(() => {
+    for (const e of events) animatedIds.current.add(e.id);
+  }, [events]);
 
   const { topLevel, childrenOf } = useMemo(() => {
     const childrenOf = new Map<string, ObservEvent[]>();
@@ -489,6 +602,7 @@ function EventsTimeline({ run }: { run: ObservRun }) {
     if (after == null) return;
     try {
       const p = await observApi.events(run.id, { after, limit: 200 });
+      for (const e of p.items) animatedIds.current.add(e.id); // 加载更多历史不播
       addAsc(p.items);
       setAfter(p.nextCursor);
     } catch (e) {
@@ -497,33 +611,42 @@ function EventsTimeline({ run }: { run: ObservRun }) {
   };
 
   return (
-    <div className="overflow-y-auto rounded border border-zinc-200 bg-white p-3" style={{ maxHeight: '70vh' }}>
-      <div className="mb-2 flex items-center gap-2 border-b border-zinc-100 pb-2 text-xs text-zinc-500">
+    <div className="max-h-panel overflow-y-auto rounded border border-border bg-bg-card p-3">
+      <div className="mb-2 flex items-center gap-2 border-b border-border pb-2 text-xs text-fg-muted">
         <span className={`rounded px-1.5 py-0.5 ${runStatusColor(run.status)}`}>{runStatusLabel(run.status)}</span>
         <span>{run.toolCallCount} 个工具调用</span>
         {run.finishReason && <span>· {run.finishReason}</span>}
         {run.usage?.totalTokens != null && <span>· {run.usage.totalTokens} tokens</span>}
-        {run.error && <span className="text-red-600">· {run.error}</span>}
+        {run.error && <span className="text-danger">· {run.error}</span>}
       </div>
       {loading ? (
-        <div className="p-3 text-xs text-zinc-400">加载中…</div>
+        <div className="space-y-1.5">
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <Skeleton key={i} className="h-7 rounded" />
+          ))}
+        </div>
       ) : err ? (
-        <div className="p-3 text-xs text-red-600">{err}</div>
+        <div className="p-3 text-xs text-danger">{err}</div>
       ) : topLevel.length === 0 ? (
         <Empty text="本回合暂无事件（纯对话、无工具调用）" />
       ) : (
         <div className="space-y-1">
-          {topLevel.map((e) =>
-            e.type === 'delegate_start' ? (
-              <DelegateGroup key={e.id} start={e} children={childrenOf.get(e.id) ?? []} />
-            ) : (
-              <EventRow key={e.id} event={e} />
-            )
-          )}
+          {topLevel.map((e) => {
+            const fresh = ready.current && !animatedIds.current.has(e.id);
+            return (
+              <div key={e.id} className={fresh ? 'animate-enter-row rounded' : ''}>
+                {e.type === 'delegate_start' ? (
+                  <DelegateGroup start={e} children={childrenOf.get(e.id) ?? []} />
+                ) : (
+                  <EventRow event={e} />
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
       {after != null && (
-        <button onClick={loadMore} className="mt-2 block w-full rounded border border-zinc-200 px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-50">
+        <button onClick={loadMore} className="mt-2 block w-full rounded border border-border px-3 py-1 text-xs text-fg-muted hover:bg-bg-hover">
           ↓ 加载更多事件
         </button>
       )}
@@ -538,24 +661,24 @@ function DelegateGroup({ start, children }: { start: ObservEvent; children: Obse
   const out = (end?.output ?? {}) as { numTurns?: number; costUsd?: number; summary?: string };
   const meta = eventMeta('delegate_start');
   return (
-    <div className="rounded border border-indigo-100 bg-indigo-50/40">
+    <div className="rounded border border-info/30 bg-info-soft/40">
       <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs">
-        <span className="text-[10px] text-zinc-400">{fmtClock(start.createdAt)}</span>
+        <span className="text-[10px] text-fg-subtle">{fmtClock(start.createdAt)}</span>
         <span>{meta.icon}</span>
-        <span className="font-medium text-indigo-700">委派 Claude Code</span>
-        <span className="text-zinc-500">（{children.filter((c) => c.type === 'delegate_step').length} 步{out.costUsd != null ? ` · ~$${out.costUsd.toFixed(3)}` : ''}）</span>
+        <span className="font-medium text-info-fg">委派 Claude Code</span>
+        <span className="text-fg-muted">（{children.filter((c) => c.type === 'delegate_step').length} 步{out.costUsd != null ? ` · ~$${out.costUsd.toFixed(3)}` : ''}）</span>
         {end && <span className={`ml-auto h-2 w-2 rounded-full ${statusDotColor(end.status)}`} title={end.status} />}
-        <span className="text-zinc-400">{open ? '▾' : '▸'}</span>
+        <span className="text-fg-subtle">{open ? '▾' : '▸'}</span>
       </button>
       {open && (
-        <div className="space-y-1 border-t border-indigo-100 px-2 py-1.5">
+        <div className="space-y-1 border-t border-info/30 px-2 py-1.5">
           {children
             .slice()
             .sort((a, b) => a.seq - b.seq)
             .map((c) => (
               <EventRow key={c.id} event={c} nested />
             ))}
-          {steps === 0 && <div className="text-[11px] text-zinc-400">（无步骤记录）</div>}
+          {steps === 0 && <div className="text-[11px] text-fg-subtle">（无步骤记录）</div>}
         </div>
       )}
     </div>
@@ -570,23 +693,23 @@ function EventRow({ event, nested }: { event: ObservEvent; nested?: boolean }) {
     <div className={nested ? 'pl-2' : ''}>
       <button
         onClick={() => hasDetail && setOpen((o) => !o)}
-        className={`flex w-full items-center gap-2 px-2 py-1 text-left text-xs ${hasDetail ? 'hover:bg-zinc-50' : 'cursor-default'}`}
+        className={`flex w-full items-center gap-2 px-2 py-1 text-left text-xs ${hasDetail ? 'hover:bg-bg-hover' : 'cursor-default'}`}
       >
-        <span className="text-[10px] text-zinc-400">{fmtClock(event.createdAt)}</span>
+        <span className="text-[10px] text-fg-subtle">{fmtClock(event.createdAt)}</span>
         <span>{meta.icon}</span>
         <span className={`font-medium ${meta.color}`}>{event.label || meta.label}</span>
-        {event.toolName && <code className="rounded bg-zinc-100 px-1 text-[10px] text-zinc-600">{event.toolName}</code>}
+        {event.toolName && <code className="rounded bg-bg-subtle px-1 text-[10px] text-fg">{event.toolName}</code>}
         {event.status && <span className={`h-2 w-2 rounded-full ${statusDotColor(event.status)}`} title={event.status} />}
-        {event.durationMs != null && <span className="text-[10px] text-zinc-400">{fmtDuration(event.durationMs)}</span>}
-        {hasDetail && <span className="ml-auto text-zinc-300">{open ? '▾' : '▸'}</span>}
+        {event.durationMs != null && <span className="text-[10px] text-fg-subtle">{fmtDuration(event.durationMs)}</span>}
+        {hasDetail && <span className="ml-auto text-fg-subtle">{open ? '▾' : '▸'}</span>}
       </button>
       {open && hasDetail && (
         <div className="ml-6 mb-1 space-y-1">
           {event.input !== undefined && (
-            <pre className="overflow-x-auto rounded bg-zinc-50 p-2 text-[11px] text-zinc-700">入参 {preview(event.input)}</pre>
+            <pre className="overflow-x-auto rounded bg-bg-subtle p-2 text-[11px] text-fg">入参 {preview(event.input)}</pre>
           )}
           {event.output !== undefined && (
-            <pre className="overflow-x-auto rounded bg-zinc-50 p-2 text-[11px] text-zinc-700">出参 {preview(event.output)}</pre>
+            <pre className="overflow-x-auto rounded bg-bg-subtle p-2 text-[11px] text-fg">出参 {preview(event.output)}</pre>
           )}
         </div>
       )}
@@ -602,27 +725,38 @@ function LiveTab({ botId }: { botId: string }) {
   // 且能区分同一 row.id 的多条记录（如 run 的 start 与 end）。
   const [feed, setFeed] = useState<{ key: number; rec: ObservRecord }[]>([]);
   const counter = useRef(0);
+  const animatedKeys = useRef<Set<number>>(new Set());
   const onRec = useCallback((rec: ObservRecord) => {
     setFeed((prev) => [{ key: counter.current++, rec }, ...prev].slice(0, 300));
   }, []);
   useEventStream({ botId }, onRec);
 
+  // 提交后标记：仅新前插的项播进场（纯 SSE 流，无首屏历史）
+  useEffect(() => {
+    for (const e of feed) animatedKeys.current.add(e.key);
+  }, [feed]);
+
   return (
-    <div className="rounded border border-zinc-200 bg-white">
-      <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-2">
-        <span className="text-sm font-medium text-zinc-700">实时活动流</span>
-        <span className="flex items-center gap-1.5 text-xs text-zinc-400">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-green-500" /> 实时（SSE）
+    <div className="rounded border border-border bg-bg-card">
+      <div className="flex items-center justify-between border-b border-border px-4 py-2">
+        <span className="text-sm font-medium text-fg">实时活动流</span>
+        <span className="flex items-center gap-1.5 text-xs text-fg-subtle">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-success" /> 实时（SSE）
         </span>
       </div>
-      <div className="overflow-y-auto p-2" style={{ maxHeight: '70vh' }}>
+      <div className="max-h-panel overflow-y-auto p-2">
         {feed.length === 0 ? (
           <Empty text="等待活动…（在 Discord 给这个 bot 发消息试试）" />
         ) : (
           <div className="space-y-0.5">
-            {feed.map((entry) => (
-              <LiveRow key={entry.key} rec={entry.rec} />
-            ))}
+            {feed.map((entry) => {
+              const fresh = !animatedKeys.current.has(entry.key);
+              return (
+                <div key={entry.key} className={fresh ? 'animate-enter-row rounded' : ''}>
+                  <LiveRow rec={entry.rec} />
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -653,10 +787,10 @@ function LiveRow({ rec }: { rec: ObservRecord }) {
     line = `${rec.row.label || m.label}${rec.row.toolName ? ` · ${rec.row.toolName}` : ''}`;
   }
   return (
-    <div className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-zinc-50">
-      <span className="text-[10px] text-zinc-400">{fmtClock(ts)}</span>
+    <div className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-bg-hover">
+      <span className="text-[10px] text-fg-subtle">{fmtClock(ts)}</span>
       <span>{icon}</span>
-      <span className="truncate text-zinc-700">{line}</span>
+      <span className="truncate text-fg">{line}</span>
     </div>
   );
 }
@@ -701,40 +835,43 @@ function MemoryTab({ botId }: { botId: string }) {
   };
 
   return (
-    <div className="flex gap-3">
-      <div className="w-64 shrink-0 overflow-y-auto rounded border border-zinc-200 bg-white" style={{ maxHeight: '70vh' }}>
-        <div className="border-b border-zinc-100 px-3 py-2 text-xs font-medium text-zinc-500">记忆（{list.length}）· 只读</div>
+    <div className="flex flex-col gap-3 lg:flex-row">
+      <ListPanel title="记忆" count={list.length} subtitle="只读" className="w-full lg:w-64">
         {loading ? (
-          <div className="p-3 text-xs text-zinc-400">加载中…</div>
+          <div className="space-y-1 p-2">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <Skeleton key={i} className="h-12 rounded" />
+            ))}
+          </div>
         ) : err ? (
-          <div className="p-3 text-xs text-red-600">{err}</div>
+          <div className="p-3 text-xs text-danger">{err}</div>
         ) : list.length === 0 ? (
-          <div className="p-3 text-xs text-zinc-400">该 bot 暂无长期记忆</div>
+          <div className="p-3 text-xs text-fg-subtle">该 bot 暂无长期记忆</div>
         ) : (
           list.map((m) => (
             <button
               key={m.file}
               onClick={() => openFile(m.file)}
-              className={`block w-full border-b border-zinc-50 px-3 py-2 text-left text-xs hover:bg-zinc-50 ${sel === m.file ? 'bg-blue-50' : ''}`}
+              className={`block w-full border-b border-border px-3 py-2 text-left text-xs hover:bg-bg-hover ${sel === m.file ? 'bg-primary-soft' : ''}`}
             >
               <div className="flex items-center gap-1">
-                <span className="truncate font-medium text-zinc-700">{m.name}</span>
-                <span className="ml-auto rounded bg-zinc-100 px-1 text-[9px] text-zinc-500">{m.type}</span>
+                <span className="truncate font-medium text-fg">{m.name}</span>
+                <span className="ml-auto rounded bg-bg-subtle px-1 text-[9px] text-fg-muted">{m.type}</span>
               </div>
-              <div className="mt-0.5 truncate text-[10px] text-zinc-400">{m.description}</div>
+              <div className="mt-0.5 truncate text-[10px] text-fg-subtle">{m.description}</div>
             </button>
           ))
         )}
-      </div>
-      <div className="flex-1 min-w-0">
+      </ListPanel>
+      <div className="min-w-0 flex-1">
         {sel ? (
-          <pre className="overflow-auto rounded border border-zinc-200 bg-white p-4 text-xs text-zinc-800" style={{ maxHeight: '70vh' }}>
+          <pre className="max-h-panel overflow-auto rounded border border-border bg-bg-card p-4 text-xs text-fg">
             {content}
           </pre>
         ) : indexText ? (
           <div>
-            <div className="mb-2 text-xs text-zinc-400">MEMORY.md 索引（点左侧条目看详情）</div>
-            <pre className="overflow-auto rounded border border-zinc-200 bg-white p-4 text-xs text-zinc-700" style={{ maxHeight: '70vh' }}>
+            <div className="mb-2 text-xs text-fg-subtle">MEMORY.md 索引（点左侧条目看详情）</div>
+            <pre className="max-h-panel overflow-auto rounded border border-border bg-bg-card p-4 text-xs text-fg">
               {indexText}
             </pre>
           </div>
@@ -747,5 +884,5 @@ function MemoryTab({ botId }: { botId: string }) {
 }
 
 function Empty({ text }: { text: string }) {
-  return <div className="rounded border border-dashed border-zinc-200 bg-white p-8 text-center text-sm text-zinc-400">{text}</div>;
+  return <div className="rounded border border-dashed border-border bg-bg-card p-8 text-center text-sm text-fg-subtle">{text}</div>;
 }
