@@ -111,7 +111,7 @@ export default function BotsPage() {
       ) : (
         <div className="space-y-2">
           {bots.map((b) => (
-            <BotRow key={b.id} bot={b} providers={providers} onChange={refresh} />
+            <BotRow key={b.id} bot={b} providers={providers} allBots={bots} onChange={refresh} />
           ))}
         </div>
       )}
@@ -120,6 +120,7 @@ export default function BotsPage() {
         mode="create"
         open={showNew}
         providers={providers}
+        allBots={bots}
         onClose={() => setShowNew(false)}
         onDone={() => {
           setShowNew(false);
@@ -133,10 +134,12 @@ export default function BotsPage() {
 function BotRow({
   bot,
   providers,
+  allBots,
   onChange,
 }: {
   bot: BotWithRuntime;
   providers: Provider[];
+  allBots: BotWithRuntime[];
   onChange: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -224,6 +227,7 @@ function BotRow({
         open={editing}
         existing={bot}
         providers={providers}
+        allBots={allBots}
         onClose={() => setEditing(false)}
         onDone={() => {
           setEditing(false);
@@ -238,11 +242,12 @@ type BotFormProps = {
   open: boolean;
   onClose: () => void;
   providers: Provider[];
+  allBots: BotWithRuntime[];
   onDone: () => void;
 } & ({ mode: 'create'; existing?: never } | { mode: 'edit'; existing: BotWithRuntime });
 
 function BotForm(props: BotFormProps) {
-  const { open, onClose, providers, onDone } = props;
+  const { open, onClose, providers, allBots, onDone } = props;
   const isEdit = props.mode === 'edit';
   const existing = props.mode === 'edit' ? props.existing : undefined;
   const firstProvider = providers[0];
@@ -270,6 +275,11 @@ function BotForm(props: BotFormProps) {
   const [convWindow, setConvWindow] = useState(0);
   const [convSummary, setConvSummary] = useState(true);
   const [convRetrieval, setConvRetrieval] = useState(true);
+  // 跨 bot 协作 mention_bot：开关 / 可 @ 的目标 bot id 白名单 / 单任务最大转交跳数 / 单任务成本上限
+  const [mentionEnabled, setMentionEnabled] = useState(false);
+  const [mentionCanMention, setMentionCanMention] = useState<string[]>([]);
+  const [mentionMaxTurns, setMentionMaxTurns] = useState(6);
+  const [mentionMaxCost, setMentionMaxCost] = useState(2);
 
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -305,6 +315,10 @@ function BotForm(props: BotFormProps) {
     setConvWindow(t?.conversationMemory?.windowTurns ?? 0);
     setConvSummary(t?.conversationMemory?.summaryEnabled ?? true);
     setConvRetrieval(t?.conversationMemory?.retrievalEnabled ?? true);
+    setMentionEnabled(t?.mentionBot?.enabled ?? false);
+    setMentionCanMention(t?.mentionBot?.canMention ?? []);
+    setMentionMaxTurns(t?.mentionBot?.maxTurnsPerTask ?? 6);
+    setMentionMaxCost(t?.mentionBot?.maxCostUsd ?? 2);
     setErr(null);
     setSubmitting(false);
     tabs.setValue('basic');
@@ -341,6 +355,12 @@ function BotForm(props: BotFormProps) {
           enabled: claudeEnabled,
           maxTurns: claudeMaxTurns,
           timeoutMs: Math.max(1, claudeTimeoutMin) * 60000,
+        },
+        mentionBot: {
+          enabled: mentionEnabled,
+          canMention: mentionCanMention,
+          maxTurnsPerTask: mentionMaxTurns,
+          maxCostUsd: mentionMaxCost,
         },
       };
 
@@ -659,6 +679,72 @@ function BotForm(props: BotFormProps) {
               提示：记得到「工具配置」段填好工作目录白名单，Claude 才有干活的地方。
             </div>
           )}
+
+          {/* —— 跨 bot 协作 mention_bot —— */}
+          <ToolCard>
+            <ToolHeader
+              checked={mentionEnabled}
+              onChange={setMentionEnabled}
+              title="🤝 跨 bot 协作 mention_bot"
+              desc="把子任务在频道里 @ 给被授权的同伴 bot 接力"
+            />
+            {mentionEnabled && (
+              <div className="mt-2 space-y-3">
+                <Field label="可 @ 协作的同伴 bot（授权白名单）">
+                  {allBots.filter((b) => b.id !== existing?.id).length === 0 ? (
+                    <div className="text-[11px] text-fg-subtle">还没有其他 bot 可选——先创建别的 bot 再来授权。</div>
+                  ) : (
+                    <div className="max-h-40 space-y-1 overflow-y-auto rounded border border-border bg-bg p-2">
+                      {allBots
+                        .filter((b) => b.id !== existing?.id)
+                        .map((b) => (
+                          <label key={b.id} className="flex items-center gap-2 text-sm">
+                            <input
+                              type="checkbox"
+                              className="accent-primary-strong"
+                              checked={mentionCanMention.includes(b.id)}
+                              onChange={(e) =>
+                                setMentionCanMention((prev) =>
+                                  e.target.checked ? [...new Set([...prev, b.id])] : prev.filter((x) => x !== b.id)
+                                )
+                              }
+                            />
+                            <span className="text-fg">{b.name}</span>
+                            <code className="text-[10px] text-fg-subtle">{b.id.slice(0, 8)}</code>
+                          </label>
+                        ))}
+                    </div>
+                  )}
+                </Field>
+                <div className="flex gap-3">
+                  <Field label="单任务最大转交跳数" className="w-36">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={mentionMaxTurns}
+                      onChange={(e) => setMentionMaxTurns(Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="单任务成本上限（$，0=不限）" className="w-44">
+                    <Input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.5}
+                      value={mentionMaxCost}
+                      onChange={(e) => setMentionMaxCost(Number(e.target.value))}
+                    />
+                  </Field>
+                </div>
+                <div className="text-[11px] text-fg-muted">
+                  转交是<strong>异步</strong>的：调用后立即返回任务号，对方在频道里独立接力并回复。超跳数 / 超成本 /
+                  检测到来回循环（A→B→A→B）时会<strong>暂停并 @ 发起人</strong>给「继续 / 终止」按钮。全局还有按
+                  <code className="rounded bg-bg px-1">INTERAGENT_DAILY_USD_CAP</code>的当日成本熔断。
+                </div>
+              </div>
+            )}
+          </ToolCard>
         </TabPanel>
       </div>
     </FormModal>
@@ -706,6 +792,7 @@ function ToolBadges({ tools }: { tools?: BotTools }) {
     active.push(`dirs(${tools.workspaceDirs.length})`);
   if (tools.memory.enabled) active.push('memory');
   if (tools.webSearch.enabled) active.push('web');
+  if (tools.mentionBot.enabled) active.push(`mention(${tools.mentionBot.canMention.length})`);
   if (active.length === 0) return <div className="text-fg-subtle">工具：无</div>;
   return (
     <div className="flex flex-wrap items-center gap-1">

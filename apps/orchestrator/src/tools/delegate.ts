@@ -5,6 +5,7 @@ import { assertRealpathAllowed } from './path-guard.js';
 import { tryAcquireDelegationSlot } from '../claude/concurrency.js';
 import { runDelegation, getLastSession, sessionKey } from '../claude/delegation.js';
 import type { DelegationContext } from '../claude/delegation.js';
+import { interAgentRouter } from '../inter-agent/router.js';
 
 // 由 bot-manager 每条消息通过 generateText 的 experimental_context 注入，供 execute 取 Discord 上下文。
 export interface DelegateExperimentalContext {
@@ -55,6 +56,11 @@ export function buildDelegateTool(
         return `错误：${(e as Error).message}`;
       }
 
+      // 1.5) 全局成本熔断：今日累计协作成本达阈值 → 暂停所有新的 Claude 委派（真实订阅花费的主要来源）。
+      if (interAgentRouter.isGloballyTripped(Date.now())) {
+        return '错误：今日协作成本已达全局熔断阈值，已暂停所有新的 Claude Code 委派。请稍后再试，或调高 INTERAGENT_DAILY_USD_CAP。';
+      }
+
       // 2) 抢并发槽位（单 bot 1 / 全局 5）；抢不到不排队，直接告诉 DeepSeek 忙
       const acq = tryAcquireDelegationSlot(botId);
       if (!acq.ok) {
@@ -74,6 +80,11 @@ export function buildDelegateTool(
           ctx,
           config: { maxTurns: config.maxTurns, timeoutMs: config.timeoutMs },
         });
+        // 把本次委派的等价订阅成本回灌：全局日累计（驱动熔断）+ 若处在协作链内则计入该任务预算。
+        const now = Date.now();
+        interAgentRouter.recordGlobalCost(outcome.costUsd ?? 0, now);
+        const taskId = (experimental_context as { mention?: { taskId?: string } } | undefined)?.mention?.taskId;
+        if (taskId && outcome.costUsd) interAgentRouter.addTaskCost(taskId, outcome.costUsd, now);
         const prefix = outcome.ok ? '' : '（委派未成功完成，请如实转告用户，不要谎报已完成）\n';
         return `${prefix}Claude Code 执行结果：\n${outcome.summary}`;
       } finally {

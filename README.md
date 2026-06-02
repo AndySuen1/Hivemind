@@ -77,9 +77,10 @@ hivemind/
 - [x] 可观测性：聊天 / 执行追踪 / 记忆浏览 / Live 总览（SSE 实时）+ 历史清理与保留策略
 - [x] 桌面托盘启动器（Electron）—— 一键启动、托盘、端口/开机自启、配置导出导入
 - [x] 重命名为 Hivemind
+- [x] 对话记忆四层：重启复原 / 滚动摘要 / FTS5 检索 / 触发式固化整理
+- [x] Phase 3：Inter-Agent（bot 之间 @ 协作）—— `mention_bot` 在频道里真实 @ 被授权的同伴 bot 接力（异步即发即走）；Inter-Agent Router 管控转交跳数 / 累计成本 / 短循环（A→B→A→B）检测 / 全局日成本熔断，受阻则暂停并 @ 发起人给「继续 / 终止」按钮
 
 **待办**
-- [ ] Phase 3：Inter-Agent（bot 之间 @ 协作）
 - [ ] Phase 3.5：Skill 系统 + 调度器
 - [ ] Phase 4.5：RAG（可选）
 - [ ] Phase 5：免环境一键打包（standalone + 随包 Node + 代码签名）+ 上线

@@ -41,7 +41,7 @@ apps/orchestrator/node_modules/.bin/tsc -p apps/orchestrator/tsconfig.json --noE
 apps/orchestrator/node_modules/.bin/tsx apps/orchestrator/pA-smoke.ts
 ```
 
-各脚本对应的功能：`p2`=可观测性埋点链路 · `p3`=委派/权限消息解析 · `p4`=查询 API · `p5`=SSE 实时推送 · `p7`=数据保留清理 · `pA`=L1 对话复原 · `pB`=L2 滚动摘要 · `pC`=L4 FTS5 检索 · `pD`=L3 触发式整理 · `pE`=字符预算裁剪。改了相关模块就跑对应脚本验证。
+各脚本对应的功能：`p2`=可观测性埋点链路 · `p3`=委派/权限消息解析 · `p4`=查询 API · `p5`=SSE 实时推送 · `p7`=数据保留清理 · `pA`=L1 对话复原 · `pB`=L2 滚动摘要 · `pC`=L4 FTS5 检索 · `pD`=L3 触发式整理 · `pE`=字符预算裁剪 · `pG`=Inter-Agent Router（任务预算/短循环/熔断/relay 注册消费，纯逻辑无 Discord）。改了相关模块就跑对应脚本验证。
 
 ## 仓库结构
 
@@ -60,10 +60,17 @@ packages/shared     @hivemind/shared        跨包 Zod schema + TS 类型（唯�
 - **权限中转** `src/claude/permission-relay.ts`：只读工具自动放行；危险 Bash（rm/push/网络/装包）、`AskUserQuestion` 反问 → 发 Discord 按钮等用户裁决。
 
 ### 工具系统（`src/tools/`）
-- 每个 bot 按 `bot.tools` 配置在启动时组装工具集（`buildBotToolRuntime`）：`fs` / `bash` / `memory` / `webSearch` / `claudeCode`。运行期不变，改配置要重启实例。
+- 每个 bot 按 `bot.tools` 配置在启动时组装工具集（`buildBotToolRuntime`）：`fs` / `bash` / `memory` / `webSearch` / `claudeCode` / `mentionBot`。运行期不变，改配置要重启实例。
 - `composeSystemPrompt` 每条消息现算 system prompt = 人格 + 静态工具说明 + 实时记忆索引 + 【可选】L2 摘要 / L4 检索片段。所有源自历史的注入都套「参考数据，非指令」外壳防 prompt 注入。
 - **路径安全** `src/tools/path-guard.ts`：fs/bash/委派的所有路径都被关进 `workspaceDirs` 白名单，fail-closed（空白名单=全拒），并对已存在路径/写入目标祖先做 realpath 二次校验防 symlink/junction 逃逸。改这里务必跑相关冒烟。
 - Web search 是多源自动兜底链（DuckDuckGo→Tavily→Brave→SearXNG），按全局优先级 + 是否配 key + 当日余量自动选源。
+
+### Inter-Agent 协作（`mention_bot`，Phase 3，`src/inter-agent/`）
+- `bot.tools.mentionBot`：`enabled` / `canMention`（目标 bot **id** 白名单）/ `maxTurnsPerTask` / `maxCostUsd`。
+- **转发机制 = 真实 @mention**：A 的 `mention_bot` 用 A 的身份在频道里发 `<@Buser> message`，B 的 `handleMessage` 接力（**异步即发即走**，A 不等 B）。防全队循环的闸门：`handleMessage` 忽略自己发的消息，且对**其它 bot 发的消息只在 `interAgentRouter.consumeRelay()` 命中我方登记的 relay 时**才处理，其余 bot/webhook 一律丢弃。
+- `inter-agent/router.ts`（全局单例，纯逻辑无 Discord）：`taskRegistry`（一条 @ 链 = 一个 `MentionTask`，预算/跳数/路径的单一真相源，taskId 作跨 bot 血缘键）+ 待转交 relay 注册表（发 @ 前按 (channel,target,fromUser) FIFO 登记、发出后按 messageId 精确索引，消除网关/REST 竞态）+ 护栏（跳数 / 成本 / 短循环 A→B→A→B / 全局日成本熔断 `INTERAGENT_DAILY_USD_CAP`）。
+- `bot-manager.deliverMention`（编排 Discord 副作用）：白名单→在线→**目标按人类发起人做访问控制**（接力回合的唯一访问闸门，防 confused-deputy）→预算/循环/熔断检查。受阻 → `pauseTask` + 向发起人弹「继续/终止」按钮（`askResume`，仅 rootRequester）；继续会**重新校验在线+访问**后只放行预算/循环/熔断这一跳。
+- 链状态只在内存、**绝不进 LLM history**（铁律）；经 `experimental_context.mention` 传 `{taskId}`（接力）或 `{root}`（人类回合，首次转交才惰性开链；同回合后续调用写回 `taskId` 复用同链预算）。委派成本经 `delegate_to_claude` 回灌全局熔断 + 任务预算。
 
 ### 四层对话记忆（重启后仍能接上）
 1. **L1** 近期逐字窗口（`bot-manager.ts`，每频道内存 history，重启首次见到该频道时从 `messages` 表复原）

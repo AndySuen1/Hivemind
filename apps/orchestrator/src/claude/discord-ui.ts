@@ -135,6 +135,56 @@ export async function askPermission(params: {
   return allowed ? 'allow' : 'deny';
 }
 
+export type ResumeDecision = 'resume' | 'terminate' | 'timeout' | 'aborted';
+
+/**
+ * Inter-Agent 任务暂停时弹「▶️ 继续 / ⏹️ 终止」按钮，等**发起人**裁决。超时/abort 都有兜底（默认保持暂停）。
+ * 复用 askPermission 同款 collector 生命周期管理（只收 requesterId、单次、超时与 abort 双退出、收尾禁用组件）。
+ */
+export async function askResume(params: {
+  channel: SendableChannels;
+  requesterId: string;
+  signal: AbortSignal;
+  title: string;
+  detail?: string;
+  timeoutMs: number;
+}): Promise<ResumeDecision> {
+  const { channel, requesterId, signal, title, detail, timeoutMs } = params;
+  const minutes = Math.round(timeoutMs / 60000);
+  const body =
+    `⏸️ **协作任务已暂停**\n${title}` +
+    (detail ? `\n\`\`\`\n${clamp(detail, 1500)}\n\`\`\`` : '') +
+    `\n（${minutes} 分钟内未响应将保持暂停）`;
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('mention_resume').setLabel('继续').setStyle(ButtonStyle.Success).setEmoji('▶️'),
+    new ButtonBuilder().setCustomId('mention_terminate').setLabel('终止').setStyle(ButtonStyle.Danger).setEmoji('⏹️')
+  );
+
+  const msg = await channel.send({ content: clamp(body, DISCORD_MAX_CONTENT), components: [row] });
+
+  const outcome = await awaitOneComponent(msg, requesterId, signal, timeoutMs);
+  if (outcome.kind === 'aborted') {
+    await disable(msg, '⏹️ 任务已终止');
+    return 'aborted';
+  }
+  if (outcome.kind === 'timeout') {
+    await disable(msg, '⌛ 超时未响应，任务保持暂停');
+    return 'timeout';
+  }
+  const interaction = outcome.interaction as ButtonInteraction;
+  const resume = interaction.customId === 'mention_resume';
+  try {
+    await interaction.update({
+      content: resume ? '▶️ 已选择**继续**该协作任务' : '⏹️ 已选择**终止**该协作任务',
+      components: [],
+    });
+  } catch (e) {
+    console.warn('[discord-ui] 更新恢复交互失败（忽略）：', (e as Error).message);
+  }
+  return resume ? 'resume' : 'terminate';
+}
+
 /**
  * 弹一个 select 菜单收集单/多选答案。返回选中的 label 数组；超时/abort/无可选项返回 null。
  */

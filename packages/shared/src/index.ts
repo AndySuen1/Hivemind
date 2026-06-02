@@ -123,6 +123,21 @@ export const claudeCodeToolConfigSchema = z.object({
 });
 export type ClaudeCodeToolConfig = z.infer<typeof claudeCodeToolConfigSchema>;
 
+// Inter-Agent 协作工具（Phase 3）：mention_bot。bot 调 mention_bot(bot_name, message) 把子任务
+// 转交给同频道的另一个**被授权**的 bot；转交通过在频道里真实 @对方（对方的消息处理接力）发生，
+// 由 Inter-Agent Router 做白名单 / 预算 / 短循环检测 / 暂停-恢复管控（见 inter-agent/router.ts）。
+// 转交是**异步即发即走**：mention_bot 立刻返回任务号，对方在频道里接力，不阻塞调用方。
+export const mentionBotToolConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  // 允许 @ 的目标 bot **id** 白名单（访问控制，非名称——名称可重复/可改）。空 = 谁都不能 @。
+  canMention: z.array(z.string()).default([]),
+  // 单条协作任务（一条 @ 链）允许的最大转交跳数，防失控级联 / 互相 @ 刷额度。达到即暂停等人裁决。
+  maxTurnsPerTask: z.number().int().positive().max(20).default(6),
+  // 单条任务累计的最大成本（USD，主要来自链内 Claude 委派的等价订阅成本）。0 = 不按成本限。达到即暂停。
+  maxCostUsd: z.number().nonnegative().max(100).default(2),
+});
+export type MentionBotToolConfig = z.infer<typeof mentionBotToolConfigSchema>;
+
 export const botToolsSchema = z.object({
   // fs / bash / claudeCode 共用的工作目录白名单：fs 的访问边界 + bash 与 Claude 子进程的起始 cwd。只填一次。
   workspaceDirs: z.array(z.string()).default([]),
@@ -132,6 +147,7 @@ export const botToolsSchema = z.object({
   conversationMemory: conversationMemoryConfigSchema.default({}),
   webSearch: webSearchToolConfigSchema.default({}),
   claudeCode: claudeCodeToolConfigSchema.default({}),
+  mentionBot: mentionBotToolConfigSchema.default({}),
 });
 export type BotTools = z.infer<typeof botToolsSchema>;
 
@@ -145,6 +161,7 @@ export const botToolsPartialSchema = z.object({
   conversationMemory: conversationMemoryConfigSchema.partial().optional(),
   webSearch: webSearchToolConfigSchema.partial().optional(),
   claudeCode: claudeCodeToolConfigSchema.partial().optional(),
+  mentionBot: mentionBotToolConfigSchema.partial().optional(),
 });
 export type BotToolsPartial = z.infer<typeof botToolsPartialSchema>;
 
@@ -226,10 +243,24 @@ export const observEventTypeSchema = z.enum([
   'permission_request', // Claude 请求危险操作授权
   'permission_decision',// 用户在 Discord 的裁决（allow/deny/timeout/aborted）
   'ask_question',       // AskUserQuestion 反问及收集到的答案
+  'mention',            // Inter-Agent 协作：一次跨 bot 转交（forwarded/received/paused_*/denied/not_found…）
   'error',              // 运行错误
   'rate_limit',         // 订阅限流事件
 ]);
 export type ObservEventType = z.infer<typeof observEventTypeSchema>;
+
+// Inter-Agent 协作任务（一条 @ 链）的状态。active 进行中；done 自然结束（链尾 bot 直接回复未再转交）；
+// paused_* 触达某护栏被暂停、等发起人在 Discord 裁决「继续/终止」；terminated 被发起人终止。
+// 仅在 orchestrator 内存（inter-agent/router.ts 的 taskRegistry）维护，目前不落库——
+// 跨 bot 血缘靠 events 里 type='mention' 事件的 input.taskId 关联（v2 若要 dashboard 查询再建表）。
+export type MentionTaskState =
+  | 'active'
+  | 'paused_turns'
+  | 'paused_budget'
+  | 'paused_loop'
+  | 'paused_global'
+  | 'terminated'
+  | 'done';
 
 // 一回合（run）的状态：running 进行中；ok 正常完成；error 出错；aborted 被取消/超时。
 export type ObservRunStatus = 'running' | 'ok' | 'error' | 'aborted';

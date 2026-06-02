@@ -8,6 +8,7 @@ import {
   conversationMemoryConfigSchema,
   webSearchToolConfigSchema,
   claudeCodeToolConfigSchema,
+  mentionBotToolConfigSchema,
 } from '@hivemind/shared';
 import { getDb } from './db.js';
 import { setSecret, getSecret, deleteSecret, secretAccount } from './secrets.js';
@@ -151,6 +152,7 @@ function parseBotTools(raw: string): Bot['tools'] {
     conversationMemory: section(conversationMemoryConfigSchema, o.conversationMemory),
     webSearch: section(webSearchToolConfigSchema, o.webSearch),
     claudeCode: section(claudeCodeToolConfigSchema, o.claudeCode),
+    mentionBot: section(mentionBotToolConfigSchema, o.mentionBot),
   };
 }
 
@@ -226,6 +228,7 @@ export const botRepo = {
           conversationMemory: { ...existing.tools.conversationMemory, ...(pt.conversationMemory ?? {}) },
           webSearch: { ...existing.tools.webSearch, ...(pt.webSearch ?? {}) },
           claudeCode: { ...existing.tools.claudeCode, ...(pt.claudeCode ?? {}) },
+          mentionBot: { ...existing.tools.mentionBot, ...(pt.mentionBot ?? {}) },
         }
       : existing.tools;
     const tools = botToolsSchema.parse(mergedTools);
