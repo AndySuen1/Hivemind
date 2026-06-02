@@ -130,12 +130,12 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
 
   // projects 必须先于 bots（bots.project_id 引用项目；先 upsert 项目行，bot 的 projectId 才能解析、不悬挂）
   const upsertProject = db.prepare(`
-    INSERT INTO projects (id, name, description, max_turns_per_task, max_cost_usd, created_at, updated_at)
-    VALUES (@id, @name, @description, @max_turns_per_task, @max_cost_usd, @created_at, @updated_at)
+    INSERT INTO projects (id, name, description, max_turns_per_task, max_cost_usd, workspace_dirs, created_at, updated_at)
+    VALUES (@id, @name, @description, @max_turns_per_task, @max_cost_usd, @workspace_dirs, @created_at, @updated_at)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name, description = excluded.description,
       max_turns_per_task = excluded.max_turns_per_task, max_cost_usd = excluded.max_cost_usd,
-      updated_at = excluded.updated_at
+      workspace_dirs = excluded.workspace_dirs, updated_at = excluded.updated_at
   `);
   if (Array.isArray(data.projects)) {
     for (const pj of data.projects as Project[]) {
@@ -147,6 +147,7 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
           description: pj.description ?? '',
           max_turns_per_task: pj.maxTurnsPerTask ?? 6,
           max_cost_usd: pj.maxCostUsd ?? 2,
+          workspace_dirs: JSON.stringify(Array.isArray(pj.workspaceDirs) ? pj.workspaceDirs : []),
           created_at: pj.createdAt ?? now,
           updated_at: now,
         });
@@ -159,11 +160,12 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
   const projectExists = db.prepare('SELECT 1 FROM projects WHERE id = ?');
 
   const upsertBot = db.prepare(`
-    INSERT INTO bots (id, name, provider_id, system_prompt, temperature, tools, allowed_requesters, project_id, enabled, created_at, updated_at)
-    VALUES (@id, @name, @provider_id, @system_prompt, @temperature, @tools, @allowed_requesters, @project_id, @enabled, @created_at, @updated_at)
+    INSERT INTO bots (id, name, provider_id, system_prompt, role, temperature, tools, allowed_requesters, project_id, enabled, created_at, updated_at)
+    VALUES (@id, @name, @provider_id, @system_prompt, @role, @temperature, @tools, @allowed_requesters, @project_id, @enabled, @created_at, @updated_at)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name, provider_id = excluded.provider_id, system_prompt = excluded.system_prompt,
-      temperature = excluded.temperature, tools = excluded.tools, allowed_requesters = excluded.allowed_requesters,
+      role = excluded.role, temperature = excluded.temperature, tools = excluded.tools,
+      allowed_requesters = excluded.allowed_requesters,
       project_id = excluded.project_id, enabled = excluded.enabled, updated_at = excluded.updated_at
   `);
   for (const b of data.bots as BotExport[]) {
@@ -177,6 +179,7 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
         name: b.name,
         provider_id: b.providerId,
         system_prompt: b.systemPrompt ?? '你是一个友好、简洁的中文助手。',
+        role: b.role ?? '',
         temperature: b.temperature ?? 1.3,
         tools: JSON.stringify(tools),
         allowed_requesters: JSON.stringify(b.allowedRequesters ?? []),

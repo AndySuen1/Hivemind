@@ -85,6 +85,28 @@ export interface PendingRelay {
   createdAt: number;
 }
 
+/**
+ * 一条「已发出、等待对方接力回报」的转交消息登记。owner（发出 @ 转交消息的 bot）在消息发出后按其消息 id 登记；
+ * 当频道里出现「引用回复了这条消息」的 bot 消息时，owner 据此把对方的回复当作本协作任务的**接力回报**来处理。
+ * 这修复了「员工 bot 引用回复 PM 的转交消息时，PM 收不到 / 不处理」——回报方向此前完全没接线。
+ *
+ * 非一次性消费：同一条「@ 了多个同伴」的消息可能收到多个同伴各自的回复，都应回到 owner；仅按 TTL 过期清理。
+ */
+export interface ReplyAwait {
+  taskId: string;
+  /** 发出该 @ 转交消息的 bot id —— 对方的回报应回到它。 */
+  ownerBotId: string;
+  channelId: string;
+  /** 被引用回复的那条消息 id（= owner 发出的 @ 转交消息 / 内联 @ 改写后的回复消息）。 */
+  messageId: string;
+  /**
+   * 这条转交消息 @ 的目标同伴的 Discord user id 集合 —— 只有这些同伴的「引用回复」才是合法回报。
+   * 防止频道里其它 bot（非被 @ 者）恰好引用回复这条消息时被误当作回报处理。空集 = 不校验（向后兼容）。
+   */
+  expectedSenderUserIds: string[];
+  createdAt: number;
+}
+
 /** mention_bot 工具调用 deliverMention 的入参（除调用方 Discord 上下文外的部分）。 */
 export interface DeliverMentionArgs {
   /** 调用方回合的链上下文（人类回合=带 root；接力回合=带 taskId）。 */

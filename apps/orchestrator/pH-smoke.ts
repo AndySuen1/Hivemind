@@ -6,6 +6,7 @@ import { rmSync, existsSync } from 'node:fs';
 import { initDb, getDb } from './src/db.ts';
 import { projectRepo, botRepo } from './src/repos.ts';
 import { exportConfig, importConfig } from './src/config-io.ts';
+import { mergeWorkspaceDirs, formatTeamRoster } from './src/inter-agent/team.ts';
 
 const DB = 'd:/tmp/pH-smoke.db';
 for (const f of [DB, DB + '-wal', DB + '-shm']) if (existsSync(f)) rmSync(f);
@@ -88,17 +89,45 @@ check('项目已不存在', projectRepo.get(p2.id) === null);
 check('原成员 b1.project_id 置 NULL', pidOf('b1') === null);
 check('删不存在的项目返回 false', projectRepo.delete('nope') === false);
 
-console.log('— config-io 往返保留项目与 bot.projectId（不含密钥，避开 keytar）—');
-const pX = projectRepo.create({ name: '导出组', memberBotIds: ['b1'], maxTurnsPerTask: 9, maxCostUsd: 0 });
+console.log('— team 纯 helper：mergeWorkspaceDirs / formatTeamRoster —');
+check('合并去重保序 + 去空白', JSON.stringify(mergeWorkspaceDirs([' /a ', '/b'], ['/b', '/c', '  '])) === JSON.stringify(['/a', '/b', '/c']));
+{
+  const r = formatTeamRoster('ProjectA', { name: '程序-J', role: '程序' }, [{ name: 'PM-L', role: '项目经理' }, { name: '策划-D', role: '' }]);
+  check('花名册含本 bot 岗位', r.includes('你在本项目的岗位是「程序」'));
+  check('花名册含同伴及岗位', r.includes('- PM-L —— 项目经理'));
+  check('无岗位同伴只列名字', r.includes('- 策划-D') && !r.includes('策划-D ——'));
+  check('自己标注（你）', r.includes('- 程序-J —— 程序（你）'));
+  check('无其它成员时说明', formatTeamRoster('P', { name: 'X', role: '' }, []).includes('暂无其它在编成员'));
+}
+
+console.log('— 项目工作目录 workspace_dirs 往返 —');
+const pd = projectRepo.create({ name: '目录组', workspaceDirs: ['E:\\UEProjects\\ProjectA', 'D:\\notes'] });
+check('create 默认 workspaceDirs（无则空）', JSON.stringify(projectRepo.create({ name: '空目录组' }).workspaceDirs) === '[]');
+check('create 存 workspaceDirs', JSON.stringify(projectRepo.get(pd.id)?.workspaceDirs) === JSON.stringify(['E:\\UEProjects\\ProjectA', 'D:\\notes']));
+projectRepo.update(pd.id, { workspaceDirs: ['/only'] });
+check('update 改 workspaceDirs', JSON.stringify(projectRepo.get(pd.id)?.workspaceDirs) === JSON.stringify(['/only']));
+
+console.log('— bot 岗位 role 往返 —');
+check('默认 role 为空串', botRepo.get('b2')?.role === '');
+await botRepo.update('b2', { role: '后端工程师' });
+check('role 落库 + 读回', botRepo.get('b2')?.role === '后端工程师');
+
+console.log('— config-io 往返保留项目/bot.projectId + workspaceDirs + role（不含密钥，避开 keytar）—');
+await botRepo.update('b1', { role: '项目经理' });
+const pX = projectRepo.create({ name: '导出组', memberBotIds: ['b1'], maxTurnsPerTask: 9, maxCostUsd: 0, workspaceDirs: ['/exp/dir'] });
 const bundle = await exportConfig(false);
 check('导出 bundle 含 projects', Array.isArray(bundle.projects) && bundle.projects!.some((p) => p.id === pX.id));
+check('导出 project 带 workspaceDirs', bundle.projects!.find((p) => p.id === pX.id)?.workspaceDirs.join() === '/exp/dir');
 check('导出的 bot 带 projectId', bundle.bots.find((b) => b.id === 'b1')?.projectId === pX.id);
+check('导出的 bot 带 role', bundle.bots.find((b) => b.id === 'b1')?.role === '项目经理');
 projectRepo.delete(pX.id); // 模拟新机器：项目没了，b1.project_id 置 NULL
 check('清理后 b1 无项目', pidOf('b1') === null);
 const res = await importConfig(bundle);
 check('导入计数 projects ≥ 1', res.projects >= 1);
 check('导入后项目预算恢复（maxTurns=9）', projectRepo.get(pX.id)?.maxTurnsPerTask === 9);
+check('导入后项目 workspaceDirs 恢复', projectRepo.get(pX.id)?.workspaceDirs.join() === '/exp/dir');
 check('导入后 b1.projectId 恢复', pidOf('b1') === pX.id);
+check('导入后 b1.role 恢复', botRepo.get('b1')?.role === '项目经理');
 // 悬挂防护：projectId 指向不存在项目 → 导入置 NULL
 const dangling = { ...bundle, projects: [], bots: bundle.bots.map((b) => ({ ...b })) };
 projectRepo.delete(pX.id);

@@ -17,6 +17,7 @@ import type {
   MentionTaskState,
   PendingHop,
   PendingRelay,
+  ReplyAwait,
 } from './types.js';
 
 // 全局日成本熔断阈值（USD）。0 = 关闭熔断。默认 10：个人用、主要挡 Claude 委派失控刷订阅额度。
@@ -26,8 +27,20 @@ const DAILY_USD_CAP = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 10;
 })();
 
+// 同一任务内「转交给同一个目标 bot」的累计跳数上限。isShortLoop 只抓严格 A→B→A→B 乒乓，挡不住扇出型/多角
+// 级联风暴（实测：PM 反复 @ 同一批同伴、回报里又带 @）。这条按「目标在 hops 中出现次数」兜底：达上限即暂停
+// 等发起人裁决。默认 5（允许正常多轮协作，挡住失控刷屏）。0 = 关闭此项检查。可由 INTERAGENT_MAX_HOPS_PER_TARGET 调。
+const MAX_HOPS_PER_TARGET = (() => {
+  const raw = process.env.INTERAGENT_MAX_HOPS_PER_TARGET;
+  const n = raw == null || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5;
+})();
+
 // 待转交 relay 的存活上限（ms）：对方可能离线/消息发失败，超时未被消费即作废，防注册表无界增长。
 const RELAY_TTL_MS = 60_000;
+// 「等待接力回报」登记的存活上限（ms）：对方可能跑很久（如 delegate_to_claude 多步委派）才回复，
+// 故远长于 relay TTL。超时仍没回报即作废，防注册表无界增长。
+const REPLY_AWAIT_TTL_MS = 60 * 60_000;
 // 已结束（done/terminated）任务在注册表里保留多久后清除（留窗口给恢复按钮的尾随交互/日志）。
 const TASK_TTL_MS = 60 * 60_000;
 // 兜底：任何任务（含 active/paused，例如发起人始终不点恢复按钮）空闲超过此值即清除，防注册表无界增长。
@@ -59,6 +72,8 @@ export class InterAgentRouter {
   private relaysById = new Map<string, PendingRelay>();
   // FIFO 队列键：`${channelId}:${targetBotId}:${fromUserId}`，消除「拿到 messageId 前网关已派发」的竞态。
   private relayFifo = new Map<string, PendingRelay[]>();
+  // 「等待接力回报」登记：键 `${channelId}:${messageId}`（被引用回复的那条 @ 转交消息）。
+  private replyAwaits = new Map<string, ReplyAwait>();
 
   // 全局日成本累计（熔断用）。跨「日」自动归零（lazy，在读写时滚动）。
   private costDay = 0;
@@ -119,6 +134,9 @@ export class InterAgentRouter {
     if (task.budget.maxCostUsd > 0 && task.budget.costUsd >= task.budget.maxCostUsd)
       return { ok: false, state: 'paused_budget' };
     if (isShortLoop(task.hops, targetBotId)) return { ok: false, state: 'paused_loop' };
+    // 扇出型/多角风暴兜底：同一目标在本任务被转交过太多次（isShortLoop 只抓严格乒乓，抓不到这类）。
+    if (MAX_HOPS_PER_TARGET > 0 && task.hops.filter((h) => h === targetBotId).length >= MAX_HOPS_PER_TARGET)
+      return { ok: false, state: 'paused_loop' };
     return { ok: true };
   }
 
@@ -311,6 +329,57 @@ export class InterAgentRouter {
   }
 
   // ----------------------------------------------------------------
+  // 等待接力回报登记（修复：对方引用回复转交消息时，回报回不到发起 bot）
+  // ----------------------------------------------------------------
+
+  private replyAwaitKey(channelId: string, messageId: string): string {
+    return `${channelId}:${messageId}`;
+  }
+
+  /** owner 发出 @ 转交消息后登记：当被 @ 的同伴「引用回复」这条消息时，把回复当作本任务的接力回报路由回 owner。 */
+  registerReplyAwait(input: {
+    taskId: string;
+    ownerBotId: string;
+    channelId: string;
+    messageId: string;
+    /** 这条消息 @ 的目标同伴 user id（合法回报方白名单；空 = 不校验）。 */
+    expectedSenderUserIds: string[];
+    now: number;
+  }): void {
+    this.sweepReplyAwaits(input.now);
+    this.replyAwaits.set(this.replyAwaitKey(input.channelId, input.messageId), {
+      taskId: input.taskId,
+      ownerBotId: input.ownerBotId,
+      channelId: input.channelId,
+      messageId: input.messageId,
+      expectedSenderUserIds: [...input.expectedSenderUserIds],
+      createdAt: input.now,
+    });
+  }
+
+  /**
+   * 命中判定：一条 bot 消息「引用回复」的目标消息（refMessageId），是否是 ownerBotId 自己发出、仍在等待回报的
+   * 转交消息，且回报方（senderUserId）确属当初被 @ 的同伴。命中返回该登记（含 taskId）。**非一次性**（同一条
+   * @ 了多个同伴的消息会陆续收到多个回报，都要回到 owner），仅按 owner + 频道 + 回报方白名单 + 未过期校验；
+   * 过期与无界增长由 TTL sweep 处理。
+   */
+  matchReplyAwait(input: { channelId: string; refMessageId: string; ownerBotId: string; senderUserId: string; now: number }): ReplyAwait | undefined {
+    this.sweepReplyAwaits(input.now);
+    const ra = this.replyAwaits.get(this.replyAwaitKey(input.channelId, input.refMessageId));
+    if (!ra || ra.ownerBotId !== input.ownerBotId) return undefined;
+    // 回报方必须是当初被 @ 的同伴之一（防其它 bot 恰好引用回复这条转交消息被误当作回报）。
+    if (ra.expectedSenderUserIds.length > 0 && !ra.expectedSenderUserIds.includes(input.senderUserId)) return undefined;
+    return ra;
+  }
+
+  private sweepReplyAwaits(now: number): void {
+    if (this.replyAwaits.size === 0) return;
+    for (const [k, ra] of [...this.replyAwaits]) {
+      if (now - ra.createdAt > REPLY_AWAIT_TTL_MS) this.replyAwaits.delete(k);
+    }
+  }
+
+  // ----------------------------------------------------------------
   // 全局日成本熔断
   // ----------------------------------------------------------------
 
@@ -345,6 +414,7 @@ export class InterAgentRouter {
     this.tasks.clear();
     this.relaysById.clear();
     this.relayFifo.clear();
+    this.replyAwaits.clear();
     this.costDay = 0;
     this.costToday = 0;
   }
@@ -352,3 +422,5 @@ export class InterAgentRouter {
 
 export const interAgentRouter = new InterAgentRouter();
 export const DAILY_USD_CAP_VALUE = DAILY_USD_CAP;
+export const REPLY_AWAIT_TTL_MS_VALUE = REPLY_AWAIT_TTL_MS;
+export const MAX_HOPS_PER_TARGET_VALUE = MAX_HOPS_PER_TARGET;

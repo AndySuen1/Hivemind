@@ -173,6 +173,7 @@ export function buildApi(): FastifyInstance {
       patch.discordToken !== undefined ||
       patch.providerId !== undefined ||
       patch.systemPrompt !== undefined ||
+      patch.role !== undefined ||
       patch.temperature !== undefined ||
       patch.tools !== undefined ||
       patch.allowedRequesters !== undefined ||
@@ -186,9 +187,9 @@ export function buildApi(): FastifyInstance {
         botManager.stop(id).catch((e) => app.log.error(`[bot ${id}] stop failed: ${e.message}`));
       }
     }
-    // 改了项目归属 / 启停 / 改名，都会变同项目同伴的「可协作名单（含名字）/ mention_bot 装配」——重启同伴刷新。
-    // （同项目内成员的 mention_bot 是否装配 + 提示里的同伴名字，都在同伴实例启动时按当时的成员快照算定。）
-    if (projectChanged || before.enabled !== updated.enabled || patch.name !== undefined) {
+    // 改了项目归属 / 启停 / 改名 / 改岗位，都会变同项目同伴的「团队花名册 + 可协作名单 / mention_bot 装配」——
+    // 重启同伴刷新（同伴的花名册里有本 bot 的名字与岗位，都在同伴实例启动时按当时快照算定）。
+    if (projectChanged || before.enabled !== updated.enabled || patch.name !== undefined || patch.role !== undefined) {
       restartProjectPeers([before.projectId, updated.projectId], id);
     }
 
@@ -279,6 +280,9 @@ export function buildApi(): FastifyInstance {
     const { id } = req.params as { id: string };
     const patch = projectUpdateSchema.parse(req.body);
     const membersChanged = patch.memberBotIds !== undefined;
+    // 工作目录改动 → 成员可见目录（path-guard 白名单）变了；项目名改动 → 成员花名册里的项目名变了。两者都需重启成员刷新。
+    const dirsChanged = patch.workspaceDirs !== undefined;
+    const nameChanged = patch.name !== undefined;
     // 改成员前先记下：本项目当前成员（含将被移出的）+ 被拉入 bot 的原项目（其剩余同伴要刷新）
     const beforeMembers = membersChanged ? projectRepo.listMembers(id).map((b) => b.id) : [];
     const oldProjects = membersChanged
@@ -286,10 +290,15 @@ export function buildApi(): FastifyInstance {
       : [];
     const updated = projectRepo.update(id, patch);
     if (!updated) return reply.code(404).send({ ok: false, error: '项目不存在' });
-    // 预算/名称改动无需重启（转交时实时读项目预算）；仅成员变更才刷新相关 bot。
-    if (membersChanged) {
-      const ids = new Set<string>([...beforeMembers, ...projectRepo.listMembers(id).map((b) => b.id)]);
-      for (const pid of oldProjects) for (const b of botRepo.listByProject(pid)) ids.add(b.id);
+    // 预算（maxTurns/maxCost）改动无需重启（转交时实时读项目预算）。其余按上面规则刷新相关 bot。
+    if (membersChanged || dirsChanged || nameChanged) {
+      const ids = new Set<string>();
+      if (membersChanged) {
+        for (const bid of beforeMembers) ids.add(bid);
+        for (const pid of oldProjects) for (const b of botRepo.listByProject(pid)) ids.add(b.id);
+      }
+      // 工作目录 / 项目名变更影响**全体现有成员**；成员变更后的当前成员也需刷新。
+      for (const b of projectRepo.listMembers(id)) ids.add(b.id);
       restartBots(ids);
     }
     return { ok: true, data: { ...updated, memberBotIds: projectRepo.listMembers(id).map((b) => b.id) } };

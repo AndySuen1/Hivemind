@@ -15,6 +15,7 @@ import {
   PageContainer,
   PageHeader,
   Skeleton,
+  Textarea,
   useConfirm,
   useToast,
 } from '@/components/ui';
@@ -192,6 +193,7 @@ function ProjectFormModal({
   const [description, setDescription] = useState('');
   const [maxTurns, setMaxTurns] = useState(6);
   const [maxCost, setMaxCost] = useState(2);
+  const [wsDirs, setWsDirs] = useState('');
   const [members, setMembers] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -203,6 +205,7 @@ function ProjectFormModal({
     setDescription(existing?.description ?? '');
     setMaxTurns(existing?.maxTurnsPerTask ?? 6);
     setMaxCost(existing?.maxCostUsd ?? 2);
+    setWsDirs((existing?.workspaceDirs ?? []).join('\n'));
     setMembers(existing?.memberBotIds ?? []);
     setErr(null);
     setSubmitting(false);
@@ -220,12 +223,14 @@ function ProjectFormModal({
     setSubmitting(true);
     setErr(null);
     try {
+      const workspaceDirs = wsDirs.split('\n').map((s) => s.trim()).filter(Boolean);
       if (isEdit && existing) {
         const patch: ProjectUpdate = {
           name,
           description,
           maxTurnsPerTask: maxTurns,
           maxCostUsd: maxCost,
+          workspaceDirs,
           memberBotIds: members,
         };
         await projectsApi.update(existing.id, patch);
@@ -235,6 +240,7 @@ function ProjectFormModal({
           description,
           maxTurnsPerTask: maxTurns,
           maxCostUsd: maxCost,
+          workspaceDirs,
           memberBotIds: members,
         };
         await projectsApi.create(input);
@@ -272,6 +278,15 @@ function ProjectFormModal({
           <Input type="number" min={0} max={100} step={0.5} value={maxCost} onChange={(e) => setMaxCost(Number(e.target.value))} />
         </Field>
       </div>
+      <Field label="项目工作目录（每行一个；本项目全体成员可见。成员实际可访问 = 这份 + 它自己在「Bots」里配的）">
+        <Textarea
+          value={wsDirs}
+          onChange={(e) => setWsDirs(e.target.value)}
+          rows={3}
+          className="font-mono"
+          placeholder={'E:\\UEProjects\\ProjectA\nD:\\notes\\ProjectA'}
+        />
+      </Field>
       <Field label="成员 bot（勾选加入本项目；同项目成员可互相 @）">
         {bots.length === 0 ? (
           <div className="text-[11px] text-fg-subtle">还没有 bot——先去「Bots」创建几个再来编组。</div>

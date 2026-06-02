@@ -8,6 +8,7 @@ import type { DelegationContext } from './claude/delegation.js';
 import type { MentionExperimentalContext } from './tools/mention-bot.js';
 import { interAgentRouter, InterAgentRouter, type CheckResult } from './inter-agent/router.js';
 import type { DeliverMentionArgs, DeliverMentionResult, MentionChainContext, MentionTask, PendingHop } from './inter-agent/types.js';
+import { computePeerHandles, scanPeerMentions, rewriteHandles, resolveMentionsReadable, resolvePeerByHandle } from './inter-agent/inline-mention.js';
 import { askResume, sendStatus } from './claude/discord-ui.js';
 import { recorder } from './recorder.js';
 import { observRepo } from './observ-repo.js';
@@ -23,6 +24,17 @@ import {
   MEMORY_MAX_FACTS,
 } from './memory-consolidation.js';
 import { sessionMetaFromMessage, localToolLabel, shapeToolInput, isToolError } from './observe-helpers.js';
+
+/**
+ * 内联 @ 触发已通过护栏、登记好（FIFO）的一条待发转交：发出回复后由 processTurn 按消息块回填 messageId
+ * 并登记「等待接力回报」。relay 先于发送登记（沿用 FIFO-first 消除网关竞态），attached 标记是否已回填。
+ */
+interface InlinePendingRelay {
+  relayId: string;
+  targetUserId: string;
+  taskId: string;
+  attached: boolean;
+}
 
 // L1 近期逐字窗口的全局默认轮数（实际消息数 = ×2）。可被每 bot 的 conversationMemory.windowTurns 覆盖。
 // 读 env BOT_HISTORY_TURNS（仿 observ-retention 的 intEnv：缺省/非法 → 默认 20），clamp 到 [1,100] 防撑爆上下文。
@@ -198,22 +210,45 @@ class BotInstance {
     let relayChain: MentionChainContext | undefined;
     // 访问控制 / 可观测性归属的「发起人」：人类回合 = 消息作者；接力回合 = 链的人类发起人。
     let requesterId = msg.author.id;
+    // 该回合是否为「接力回报」（对方引用回复了我发出的转交消息），用于可观测性标签 + 抑制回报回合再扇出。
+    let isReport = false;
+    // 转发/回报这条消息的同伴 bot（= msg.author）。用于：可观测性 fromBotId 取真实转发者、给接收方注入来源上下文。
+    let senderBot: { id: string; name: string } | undefined;
 
     if (msg.author.bot) {
-      // 「真实 @mention 转发」下，每个 bot 都会看到 A 发的 @ 消息。只接力「我方 Inter-Agent Router 登记过的
-      // 合法转交」——consumeRelay 命中才处理；其余 bot/webhook 闲聊一律在此丢弃，杜绝全队循环。
-      const relay = interAgentRouter.consumeRelay({
-        messageId: msg.id,
-        channelId: msg.channel.id,
-        targetBotId: this.bot.id,
-        authorId: msg.author.id,
-        now: Date.now(),
-      });
-      if (!relay) return;
-      const task = interAgentRouter.getTask(relay.taskId);
-      if (!task || task.state === 'terminated') return; // 任务已被发起人终止，不再接力
-      relayChain = { taskId: task.taskId };
-      requesterId = task.rootRequesterId;
+      const now = Date.now();
+      senderBot = botManager.resolveBotByUserId(msg.author.id);
+      // ① 接力回报：对方「引用回复」了我发出的 @ 转交消息 → 把它当作本协作任务的回报来处理。
+      // （修复：员工 bot 引用回复 PM 的转交消息时，PM 此前收不到 / 不处理——回报方向从未接线。）
+      // 仅当回报方确属当初被 @ 的同伴时才受理（matchReplyAwait 校验 senderUserId），防其它 bot 误触发回报。
+      const refId = msg.reference?.messageId;
+      const back = refId
+        ? interAgentRouter.matchReplyAwait({ channelId: msg.channel.id, refMessageId: refId, ownerBotId: this.bot.id, senderUserId: msg.author.id, now })
+        : undefined;
+      if (back) {
+        const task = interAgentRouter.getTask(back.taskId);
+        if (!task || task.state === 'terminated') return; // 任务已终止/失效，不再处理回报
+        relayChain = { taskId: task.taskId };
+        requesterId = task.rootRequesterId;
+        isReport = true;
+      } else {
+        // ② 否则只接力「我方 Inter-Agent Router 登记过的合法转交」（@ 我）——consumeRelay 命中才处理；
+        // 其余 bot/webhook 闲聊一律在此丢弃，杜绝全队循环。
+        const relay = interAgentRouter.consumeRelay({
+          messageId: msg.id,
+          channelId: msg.channel.id,
+          targetBotId: this.bot.id,
+          authorId: msg.author.id,
+          now,
+        });
+        if (!relay) return;
+        const task = interAgentRouter.getTask(relay.taskId);
+        if (!task || task.state === 'terminated') return; // 任务已被发起人终止，不再接力
+        relayChain = { taskId: task.taskId };
+        requesterId = task.rootRequesterId;
+        // relay.fromBotId 是真实转发者（即便扇出污染了 task.hops，此处仍准确），供可观测性 fromBotId 用。
+        if (!senderBot) senderBot = { id: relay.fromBotId, name: botManager.resolveBotName(relay.fromBotId) ?? '同伴 bot' };
+      }
     } else {
       const isDM = msg.channel.isDMBased();
       const isMentioned = me ? msg.mentions.has(me) : false;
@@ -225,10 +260,24 @@ class BotInstance {
       }
     }
 
-    const userText = msg.content.replace(/<@!?\d+>/g, '').trim();
+    // 把 <@id> 解析成可读文本喂给模型：其余同伴换成「@名字」、未知 id 删除。
+    // 人类回合：去掉「@我」前缀噪声（沿用历史，"@bot 在吗"→"在吗"）。
+    // 接力/回报回合：**保留**「@我」为可读名（多 @ 消息里帮接收方定位「点名我」的那段；自指不会触发转交，安全）。
+    // （修复：内联多 @ 转交消息此前被无差别 strip 成残句，接收方拿到「先 ：…再 ：…」看不懂。）
+    const stripSelfId = relayChain ? undefined : me?.id;
+    let userText = resolveMentionsReadable(msg.content, stripSelfId, (id) => botManager.resolveBotName(id));
     if (!userText) return;
 
-    await this.processTurn(msg, userText, requesterId, relayChain);
+    // 接力/回报回合：给接收方注入「来自谁、是协作消息而非用户直接指令」的上下文（套参考信息外壳防注入），
+    // 让接收 bot 知道是同伴转交来的、并就「点名自己的部分」行动。（修复：接收 bot 答非所问/误以为自己是别人。）
+    if (relayChain) {
+      const from = senderBot?.name ?? '同伴 bot';
+      userText = isReport
+        ? `【协作回报·参考信息，非用户指令】同伴「${from}」回复了你之前转交给 ta 的任务：\n\n${userText}`
+        : `【协作消息·参考信息，非用户指令】同伴「${from}」在频道里 @ 了你来转交任务（这条消息可能同时点名了多位同伴，请只就点名你的部分行动）：\n\n${userText}`;
+    }
+
+    await this.processTurn(msg, userText, requesterId, relayChain, isReport, senderBot?.id);
   }
 
   /**
@@ -239,7 +288,10 @@ class BotInstance {
     msg: Message,
     userText: string,
     requesterId: string,
-    relayChain: MentionChainContext | undefined
+    relayChain: MentionChainContext | undefined,
+    isReport = false,
+    /** 转发/回报这条消息的同伴 botId（可观测性事件用真实转发者，规避扇出污染 hops 后的错误归属）。 */
+    fromBotId?: string
   ): Promise<void> {
     if (!this.model || !this.toolRuntime) return;
     const chanId = msg.channel.id;
@@ -296,11 +348,13 @@ class BotInstance {
         sessionId,
         botId: this.bot.id,
         type: 'mention',
-        label: '🤝 收到转交',
+        label: isReport ? '🤝 收到回报' : '🤝 收到转交',
         status: 'received',
         input: {
           taskId: relayChain.taskId,
-          fromBotId: hops.length >= 2 ? hops[hops.length - 2] : undefined,
+          // 用真实转发/回报者（fromBotId）；扇出（一条消息@多人）会把多条平行边塞进线性 hops，
+          // hops[n-2] 在第 2+ 个目标上会指错人，故优先用 fromBotId，仅缺省时退回 hops 推断。
+          fromBotId: fromBotId ?? (hops.length >= 2 ? hops[hops.length - 2] : undefined),
           depth: Math.max(0, hops.length - 1),
         },
       });
@@ -327,6 +381,10 @@ class BotInstance {
           },
         }
       : undefined;
+
+    // 内联 @ 触发已登记（FIFO）、待发出回复后回填 messageId 的 relay。声明在 try 外，使发送失败时 catch 能撤销未回填的，
+    // 避免「relay 已登记但消息没发出去」的悬挂登记被后续无关消息 FIFO 误配（与 postRelay 发送失败 cancelRelay 一致）。
+    let inlinePending: InlinePendingRelay[] = [];
 
     try {
       if ('sendTyping' in msg.channel && typeof msg.channel.sendTyping === 'function') {
@@ -408,12 +466,64 @@ class BotInstance {
         this.history.set(chanId, newHistory.slice(-keep)); // 无摘要：维持今天的硬截断（直接丢弃旧轮）
       }
 
-      // 记 assistant 消息（生成即记，无论 Discord 投递是否成功）
+      // 记 assistant 消息（生成即记，无论 Discord 投递是否成功）。记模型原文（含「@同伴名」），不记改写后的 <@id>。
       recorder.recordMessage({ sessionId, runId, botId: this.bot.id, role: 'assistant', content: replyText });
 
+      // Bug2：把回复正文里「@同项目同伴名」的纯文本转成真实 <@id> 提及 + 登记转交 relay，让对方接力处理。
+      // （DeepSeek 常按系统提示在正文里内联 @ 派活而非走 mention_bot 工具；这一步让两种写法都能真正触发对方，
+      // 并修复「@ 出现在消息中间时失败」。）best-effort：失败则原文照发、不触发内联，不打断回复。
+      // **回报回合（isReport）不再扇出**：bot 在回报/确认正文里常写「@PM-Louie 已完成」「@策划 谢谢」这类
+      // 引用性 @，若也当真转交会级联放大（实测 35s 几十条风暴的直接推手）。回报是收尾汇报，要再派活应显式调
+      // mention_bot 工具，不靠回报正文的内联 @ 自动触发。
+      let outText = replyText;
+      if (experimentalContext && !isReport) {
+        const res = botManager.deliverInlineMentions(
+          experimentalContext.discord!,
+          experimentalContext.mention!,
+          replyText,
+          Date.now()
+        );
+        outText = res.text;
+        inlinePending = res.pending;
+      }
+
       // 接力回合回复对方的转交消息，但不再 @ 回转发它的 bot（避免互相 ping 噪声 / 误触发）。
-      for (const chunk of chunkText(replyText, 1900)) {
-        await msg.reply(relayChain ? { content: chunk, allowedMentions: { repliedUser: false } } : chunk);
+      // 仅放行「我们注入的同伴 <@id>」，杜绝 LLM 正文里写出 @everyone/@role 被真实触达。
+      for (const chunk of chunkText(outText, 1900)) {
+        const injected = inlinePending.filter((p) => chunk.includes(`<@${p.targetUserId}>`)).map((p) => p.targetUserId);
+        let payload: Parameters<typeof msg.reply>[0];
+        if (relayChain) {
+          payload = injected.length
+            ? { content: chunk, allowedMentions: { users: injected, repliedUser: false } }
+            : { content: chunk, allowedMentions: { repliedUser: false } };
+        } else {
+          // 人类回合：保留「回复并 ping 发问的人」（repliedUser 默认 true），但内容里仅放行注入的同伴。
+          payload = injected.length ? { content: chunk, allowedMentions: { users: injected } } : chunk;
+        }
+        const sent = await msg.reply(payload);
+        // 内联 @ 触发：本块含某同伴的 <@id> → 回填该 relay 的 messageId（精确匹配优先），并登记「等待接力回报」，
+        // 这样对方接力后引用回复这条消息，回报能路由回本 bot（与 bug1 同一机制）。
+        if (injected.length) {
+          let taskId: string | undefined;
+          for (const p of inlinePending) {
+            if (!p.attached && chunk.includes(`<@${p.targetUserId}>`)) {
+              interAgentRouter.attachMessageId(p.relayId, sent.id);
+              p.attached = true;
+              taskId = p.taskId; // 同一回合内各 pending 同属一条任务，取其一即可
+            }
+          }
+          // expectedSenderUserIds=injected：只有本块点名的同伴才是合法回报方，杜绝其它 bot 引用回复误触发回报。
+          if (taskId) {
+            interAgentRouter.registerReplyAwait({
+              taskId,
+              ownerBotId: this.bot.id,
+              channelId: msg.channel.id,
+              messageId: sent.id,
+              expectedSenderUserIds: injected,
+              now: Date.now(),
+            });
+          }
+        }
       }
 
       // 收尾回合（投递成功后）。finishReason 记录是否因步数/长度截断。
@@ -438,6 +548,9 @@ class BotInstance {
         }
       }
     } catch (e) {
+      // 撤销「已登记但其消息没发出去」的内联 @ relay（如回复发送中途抛错），防悬挂登记被后续无关消息 FIFO 误配。
+      // 已成功发出并回填 messageId 的（attached）不动；已被对方消费的 cancelRelay 是 no-op，安全。
+      for (const p of inlinePending) if (!p.attached) interAgentRouter.cancelRelay(p.relayId);
       // abortSignal 已透传给 generateText：bot 停机 / 放弃该消息（ac.abort()）会让其抛 AbortError 落到这里。
       // abort 是**正常中止**而非出错：只把回合收尾为 'aborted'，不记 error 事件、也不向用户发误导性的
       // 「出错」消息（委派场景下 runDelegation 已记过 delegate_end(aborted)，这里再记 error 会污染时间线）。
@@ -624,6 +737,19 @@ class BotManager {
     return instance.getStatus();
   }
 
+  /** 按 Discord user id 反查在线同伴 bot（id+配置名）。供把 <@id> 渲染成可读 @名字 / 可观测性归属。 */
+  resolveBotByUserId(userId: string): { id: string; name: string } | undefined {
+    for (const inst of this.instances.values()) {
+      if (inst.userId === userId) return { id: inst.getBot().id, name: inst.getBot().name };
+    }
+    return undefined;
+  }
+
+  /** 按 Discord user id 反查同伴 bot 的配置名（缺省 undefined）。 */
+  resolveBotName(userId: string): string | undefined {
+    return this.resolveBotByUserId(userId)?.name;
+  }
+
   listStatuses(): BotRuntimeInfo[] {
     const all = botRepo.list();
     return all.map((b) => this.getStatus(b.id));
@@ -634,124 +760,203 @@ class BotManager {
   // ============================================================
 
   /**
-   * 跨 bot 转交：A 的 mention_bot 调用 → 校验（白名单/在线/访问/自指/预算/循环/熔断）→ 通过则用 A 的身份
-   * 在频道里真实 @ 目标并登记 relay（对方的 handleMessage 接力），异步即发即走；受阻则暂停 + 通知发起人裁决。
-   * 全程不抛：所有失败/暂停都转成给调用方模型看的字符串（仿 delegate 的「错误：」约定）。
+   * 跨 bot 转交（mention_bot 工具）：校验（同项目/在线/访问/自指/预算/循环/熔断）→ 通过则用调用方身份在频道里
+   * 真实 @ 目标并登记 relay（对方 handleMessage 接力），异步即发即走；受阻则暂停 + 通知发起人裁决。
+   * 全程不抛：所有失败/暂停都转成给调用方模型看的字符串（仿 delegate 的「错误：」约定）。护栏与开链逻辑由
+   * authorizeAndCommitHop 承载（与「正文内联 @」共用）；本方法只负责工具路径的「发独立 @ 消息」。
    */
   async deliverMention(fromCtx: DelegationContext, args: DeliverMentionArgs): Promise<DeliverMentionResult> {
-    // 全程不抛：DB 查询（resolveMentionTarget→botRepo.listEnabled）等可能 throw，整体兜成「错误：」字符串，
-    // 与 delegate / recorder 的 never-throw 纪律一致（AI-SDK 虽有 tool-error 兜底，但要回可读中文提示）。
     try {
       const now = Date.now();
-      const fromInst = this.instances.get(fromCtx.botId);
-      if (!fromInst) return { ok: false, reason: 'context_missing', message: '错误：发起 bot 已下线，无法转交。' };
-
-      // 0a) 发起方必须属于某个项目（协作范围 = 同项目）；项目预算用于开链
-      const callerProjectId = fromInst.getBot().projectId;
-      if (!callerProjectId)
-        return { ok: false, reason: 'context_missing', message: '错误：你还没有加入任何项目，无法 @ 其他 bot（请把你和同伴 bot 编进同一个项目）。' };
-      const project = projectRepo.get(callerProjectId);
-      if (!project) return { ok: false, reason: 'context_missing', message: '错误：你所属的项目已不存在。' };
-
-      // 0b) 转交内容去掉 @ 后必须有实质内容（否则 B 侧 strip 后为空会被静默丢弃、链白白断掉）
+      // 转交内容去掉 @ 后必须有实质内容（否则 B 侧 strip 后为空会被静默丢弃、链白白断掉）。仅工具路径需要——
+      // 内联 @ 的「正文」恒非空。
       const cleanMsg = args.message.replace(/<@!?\d+>/g, '').trim();
       if (!cleanMsg)
         return { ok: false, reason: 'context_missing', message: '错误：转交内容为空（去掉 @ 后没有实际内容）。请写清要对方做什么。' };
 
-      // 1) 解析任务：接力回合带 taskId；人类回合首次转交后把 taskId 写回（见下），并按 runId 兜底去重，
-      //    使同一回合内多次 mention_bot 复用同一条链/预算，而非每次新建满额度链。
-      const existingTaskId = args.chain.taskId ?? (fromCtx.runId ? this.rootTaskByRun.get(fromCtx.runId) : undefined);
-      let task: MentionTask | undefined;
-      if (existingTaskId) {
-        task = interAgentRouter.getTask(existingTaskId);
-        if (!task) return { ok: false, reason: 'task_inactive', message: '错误：协作任务上下文已失效，无法继续转交。' };
-        if (task.state !== 'active')
-          return { ok: false, reason: 'task_inactive', taskId: task.taskId, message: '错误：这条协作任务已暂停或结束，需发起人在频道里恢复后才能继续转交。' };
-      }
+      const auth = this.authorizeAndCommitHop(fromCtx, args.chain, args.targetName, args.message, now);
+      if (!auth.ok) return { ok: false, reason: auth.reason, taskId: auth.taskId, message: auth.message };
 
-      // 2) 按名字解析目标（限定在**同项目**、enabled 的 bot 内）
-      const resolved = this.resolveMentionTarget(args.targetName, callerProjectId);
-      if (resolved === 'not_found')
-        return { ok: false, reason: 'not_found', taskId: task?.taskId, message: `错误：没找到名为「${args.targetName}」的 bot（确认名称无误且对方已启用）。` };
-      if (resolved === 'not_in_project')
-        return { ok: false, reason: 'not_authorized', taskId: task?.taskId, message: `错误：「${args.targetName}」不在你的项目里，只能 @ 同项目的同伴 bot。` };
-      const targetBot = resolved;
-
-      // 3) 自指
-      if (targetBot.id === fromCtx.botId)
-        return { ok: false, reason: 'self_mention', taskId: task?.taskId, message: '错误：不能 @ 你自己。' };
-
-      // 4+5) 目标在线 + 访问控制（必须接受这条链的**人类发起人**——接力回合 B 不再校验 msg.author，
-      //      这里是唯一闸门，防「confused deputy」）。
-      const rootRequester = task?.rootRequesterId ?? args.chain.root?.rootRequesterId;
-      if (!rootRequester) return { ok: false, reason: 'context_missing', message: '错误：协作上下文缺失（内部错误）。' };
-      const live = this.targetLiveness(targetBot, rootRequester);
-      if (!live.ok)
-        return { ok: false, reason: live.reason, taskId: task?.taskId, message: `错误：${live.message}，无法转交。` };
-      const targetUserId = live.targetUserId;
-
-      // 校验通过后才惰性开链（人类回合首次转交），避免为不会成功的转交建任务
-      if (!task) {
-        const root = args.chain.root;
-        if (!root) return { ok: false, reason: 'context_missing', message: '错误：协作上下文缺失（内部错误）。' };
-        task = interAgentRouter.createTask({
-          rootRequesterId: root.rootRequesterId,
-          rootBotId: root.rootBotId,
-          channelId: root.channelId,
-          maxTurns: project.maxTurnsPerTask,
-          maxCostUsd: project.maxCostUsd,
-          now,
-        });
-        // 写回 taskId：args.chain === experimental_context.mention（同引用），本回合后续 mention_bot/delegate
-        // 即可读到 taskId，复用同一条链预算 + 让委派成本计入本任务。再按 runId 兜底（防同步并行多次调用）。
-        args.chain.taskId = task.taskId;
-        if (fromCtx.runId) {
-          this.rootTaskByRun.set(fromCtx.runId, task.taskId);
-          if (this.rootTaskByRun.size > 256) {
-            const oldest = this.rootTaskByRun.keys().next().value;
-            if (oldest !== undefined) this.rootTaskByRun.delete(oldest);
-          }
-        }
-      }
-
-      // 6) 预算 / 短循环 / 全局熔断检查
-      const hop = this.makeHop(fromCtx.botId, fromInst.userId ?? '', targetBot, targetUserId, args.message);
-      const check = interAgentRouter.checkHop(task, targetBot.id, { resumed: false, now });
-      if (!check.ok && check.state) {
-        interAgentRouter.pauseTask(task, check.state, hop, now);
-        this.recordMentionEvent(fromCtx, task.taskId, check.state, targetBot.id, targetBot.name, hop.message);
-        // 异步发暂停按钮 + 通知发起人裁决（不阻塞 A 的工具调用 / 不阻塞 Discord）
-        void this.promptResume(task.taskId, fromCtx, check.state).catch((e) =>
-          console.error('[manager] promptResume 失败（已忽略）', e)
-        );
-        return {
-          ok: false,
-          reason: check.state,
-          taskId: task.taskId,
-          message: `⛔ 与「${targetBot.name}」的协作触达上限（${reasonText(check.state)}），任务 #${InterAgentRouter.shortId(task.taskId)} 已暂停，已请发起人 <@${task.rootRequesterId}> 在频道里决定是否继续或终止。`,
-        };
-      }
-
-      // 7) 通过：**先提交跳数**（使对方接力时 task.hops 必含自己，消除网关/REST 时序依赖）→ 登记+发 @ 消息 →
-      //    记 forwarded；发送失败回滚该跳。
-      interAgentRouter.commitHop(task, targetBot.id, now);
-      const posted = await this.postRelay(task, fromCtx, hop, now);
+      // 通过（hop 已提交）：用调用方身份发独立的 @ 转交消息 → 登记 relay + 回报登记；发送失败回滚该跳。
+      const posted = await this.postRelay(auth.task, fromCtx, auth.hop, now);
       if (!posted) {
-        interAgentRouter.rollbackHop(task, targetBot.id, now);
-        return { ok: false, reason: 'offline', taskId: task.taskId, message: `错误：向「${targetBot.name}」发送转交消息失败（频道不可用？）。` };
+        interAgentRouter.rollbackHop(auth.task, auth.targetBot.id, now);
+        return { ok: false, reason: 'offline', taskId: auth.task.taskId, message: `错误：向「${auth.targetBot.name}」发送转交消息失败（频道不可用？）。` };
       }
-      this.recordMentionEvent(fromCtx, task.taskId, 'forwarded', targetBot.id, targetBot.name, hop.message);
+      this.recordMentionEvent(fromCtx, auth.task.taskId, 'forwarded', auth.targetBot.id, auth.targetBot.name, auth.hop.message);
       return {
         ok: true,
-        taskId: task.taskId,
+        taskId: auth.task.taskId,
         message:
-          `已把任务转交给「${targetBot.name}」（任务 #${InterAgentRouter.shortId(task.taskId)}）。` +
-          (hop.truncated ? '⚠️ 转交内容过长，已截断，建议精简后重发。' : '') +
+          `已把任务转交给「${auth.targetBot.name}」（任务 #${InterAgentRouter.shortId(auth.task.taskId)}）。` +
+          (auth.hop.truncated ? '⚠️ 转交内容过长，已截断，建议精简后重发。' : '') +
           'ta 会在本频道接力处理并回复，你无需等待，可以继续做别的或先答复用户已转交。',
       };
     } catch (e) {
       console.error('[manager] deliverMention 异常（已隔离）', e);
       return { ok: false, reason: 'context_missing', message: '错误：转交时发生内部错误，请稍后重试。' };
+    }
+  }
+
+  /**
+   * 转交护栏 + 开链 + **提交跳数**（mention_bot 工具与「正文内联 @」两条路共用，避免逻辑漂移）。成功时 hop 已
+   * commit，返回目标/在线身份/hop（调用方负责：登记 relay → 发出携带 <@id> 的消息 → 回填 messageId → 回报登记）。
+   * 受阻（预算/循环/熔断）会就地暂停任务 + 异步弹「继续/终止」按钮，返回 blocked=true；其余失败 blocked=false。
+   * 同步、不抛（DB 调用为 better-sqlite3 同步）；异常由各调用方的 try/catch 兜成「错误：」字符串。
+   */
+  private authorizeAndCommitHop(
+    fromCtx: DelegationContext,
+    chain: MentionChainContext,
+    targetName: string,
+    message: string,
+    now: number
+  ):
+    | { ok: true; task: MentionTask; targetBot: Bot; targetUserId: string; hop: PendingHop & { truncated: boolean } }
+    | { ok: false; blocked: boolean; reason: DeliverMentionResult['reason']; taskId?: string; message: string } {
+    const fromInst = this.instances.get(fromCtx.botId);
+    if (!fromInst) return { ok: false, blocked: false, reason: 'context_missing', message: '错误：发起 bot 已下线，无法转交。' };
+
+    // 发起方必须属于某个项目（协作范围 = 同项目）；项目预算用于开链
+    const callerProjectId = fromInst.getBot().projectId;
+    if (!callerProjectId)
+      return { ok: false, blocked: false, reason: 'context_missing', message: '错误：你还没有加入任何项目，无法 @ 其他 bot（请把你和同伴 bot 编进同一个项目）。' };
+    const project = projectRepo.get(callerProjectId);
+    if (!project) return { ok: false, blocked: false, reason: 'context_missing', message: '错误：你所属的项目已不存在。' };
+
+    // 解析任务：接力回合带 taskId；人类回合首次转交后把 taskId 写回，并按 runId 兜底去重，
+    // 使同一回合内多次转交复用同一条链/预算，而非每次新建满额度链。
+    const existingTaskId = chain.taskId ?? (fromCtx.runId ? this.rootTaskByRun.get(fromCtx.runId) : undefined);
+    let task: MentionTask | undefined;
+    if (existingTaskId) {
+      task = interAgentRouter.getTask(existingTaskId);
+      if (!task) return { ok: false, blocked: false, reason: 'task_inactive', message: '错误：协作任务上下文已失效，无法继续转交。' };
+      if (task.state !== 'active')
+        return { ok: false, blocked: false, reason: 'task_inactive', taskId: task.taskId, message: '错误：这条协作任务已暂停或结束，需发起人在频道里恢复后才能继续转交。' };
+    }
+
+    // 按名字解析目标（限定在**同项目**、enabled 的 bot 内）
+    const resolved = this.resolveMentionTarget(targetName, callerProjectId);
+    if (resolved === 'not_found')
+      return { ok: false, blocked: false, reason: 'not_found', taskId: task?.taskId, message: `错误：没找到名为「${targetName}」的 bot（确认名称无误且对方已启用）。` };
+    if (resolved === 'not_in_project')
+      return { ok: false, blocked: false, reason: 'not_authorized', taskId: task?.taskId, message: `错误：「${targetName}」不在你的项目里，只能 @ 同项目的同伴 bot。` };
+    const targetBot = resolved;
+
+    // 自指
+    if (targetBot.id === fromCtx.botId)
+      return { ok: false, blocked: false, reason: 'self_mention', taskId: task?.taskId, message: '错误：不能 @ 你自己。' };
+
+    // 目标在线 + 访问控制（必须接受这条链的**人类发起人**——接力回合不再校验 msg.author，这里是唯一闸门，防 confused deputy）
+    const rootRequester = task?.rootRequesterId ?? chain.root?.rootRequesterId;
+    if (!rootRequester) return { ok: false, blocked: false, reason: 'context_missing', message: '错误：协作上下文缺失（内部错误）。' };
+    const live = this.targetLiveness(targetBot, rootRequester);
+    if (!live.ok)
+      return { ok: false, blocked: false, reason: live.reason, taskId: task?.taskId, message: `错误：${live.message}，无法转交。` };
+    const targetUserId = live.targetUserId;
+
+    // 校验通过后才惰性开链（人类回合首次转交），避免为不会成功的转交建任务
+    if (!task) {
+      const root = chain.root;
+      if (!root) return { ok: false, blocked: false, reason: 'context_missing', message: '错误：协作上下文缺失（内部错误）。' };
+      task = interAgentRouter.createTask({
+        rootRequesterId: root.rootRequesterId,
+        rootBotId: root.rootBotId,
+        channelId: root.channelId,
+        maxTurns: project.maxTurnsPerTask,
+        maxCostUsd: project.maxCostUsd,
+        now,
+      });
+      // 写回 taskId：chain === experimental_context.mention（同引用），本回合后续转交/委派即可复用同链预算 +
+      // 让委派成本计入本任务。再按 runId 兜底（防同步并行多次调用）。
+      chain.taskId = task.taskId;
+      if (fromCtx.runId) {
+        this.rootTaskByRun.set(fromCtx.runId, task.taskId);
+        if (this.rootTaskByRun.size > 256) {
+          const oldest = this.rootTaskByRun.keys().next().value;
+          if (oldest !== undefined) this.rootTaskByRun.delete(oldest);
+        }
+      }
+    }
+
+    // 预算 / 短循环 / 全局熔断检查
+    const hop = this.makeHop(fromCtx.botId, fromInst.userId ?? '', targetBot, targetUserId, message);
+    const check = interAgentRouter.checkHop(task, targetBot.id, { resumed: false, now });
+    if (!check.ok && check.state) {
+      interAgentRouter.pauseTask(task, check.state, hop, now);
+      this.recordMentionEvent(fromCtx, task.taskId, check.state, targetBot.id, targetBot.name, hop.message);
+      // 异步发暂停按钮 + 通知发起人裁决（不阻塞调用方 / 不阻塞 Discord）
+      void this.promptResume(task.taskId, fromCtx, check.state).catch((e) =>
+        console.error('[manager] promptResume 失败（已忽略）', e)
+      );
+      return {
+        ok: false,
+        blocked: true,
+        reason: check.state,
+        taskId: task.taskId,
+        message: `⛔ 与「${targetBot.name}」的协作触达上限（${reasonText(check.state)}），任务 #${InterAgentRouter.shortId(task.taskId)} 已暂停，已请发起人 <@${task.rootRequesterId}> 在频道里决定是否继续或终止。`,
+      };
+    }
+
+    // 通过：**先提交跳数**（使对方接力时 task.hops 必含自己，消除网关/REST 时序依赖）。relay 登记 + 发送由调用方负责。
+    interAgentRouter.commitHop(task, targetBot.id, now);
+    return { ok: true, task, targetBot, targetUserId, hop };
+  }
+
+  /**
+   * Bug2：把回复正文里「@同项目同伴名」的纯文本转成真实 <@id> 提及 + 登记转交 relay，让对方接力处理本协作任务。
+   * 每个被 @ 的同伴都过同一套护栏（authorizeAndCommitHop）。返回改写后的正文 + 待回填 messageId 的 relay 列表
+   * （调用方发出回复后按消息块回填 + 登记 replyAwait，使对方回报能路由回本 bot）。
+   * 名字匹配：精确全名 + （唯一时）'-' 前缀别名。best-effort：异常整体兜住、原文照发；未授权/离线/未找到的 @
+   * 保留原文文本、不触发，不打断回复。
+   */
+  deliverInlineMentions(
+    fromCtx: DelegationContext,
+    chain: MentionChainContext,
+    text: string,
+    now: number
+  ): { text: string; pending: InlinePendingRelay[] } {
+    const pending: InlinePendingRelay[] = [];
+    try {
+      const fromInst = this.instances.get(fromCtx.botId);
+      const projectId = fromInst?.getBot().projectId;
+      if (!fromInst || !projectId) return { text, pending };
+      const peers = computePeerHandles(
+        botRepo.listByProject(projectId).filter((b) => b.id !== fromCtx.botId && b.enabled)
+      );
+      if (peers.length === 0) return { text, pending };
+      const found = scanPeerMentions(text, peers);
+      if (found.size === 0) return { text, pending };
+
+      let outText = text;
+      const notes: string[] = [];
+      for (const [peerName, handles] of found) {
+        const auth = this.authorizeAndCommitHop(fromCtx, chain, peerName, text, now);
+        if (!auth.ok) {
+          // 受阻（预算/循环/熔断）：authorizeAndCommitHop 已暂停 + 异步弹按钮，正文追加一句提示；
+          // 其余失败（离线/未授权/失活）静默保留原文 @ 文本，不打断回复。
+          if (auth.blocked) notes.push(`（⚠️ 对「${peerName}」的转交已触达上限并暂停，已请发起人裁决；其余照常。）`);
+          continue;
+        }
+        // 改写：把命中的 @全名/@别名 全部替换为真实 <@id>（长句柄优先，避免 @别名 命中 @全名 子串）。
+        outText = rewriteHandles(outText, handles, `<@${auth.targetUserId}>`);
+        // 登记 relay（FIFO，先于发送；调用方发出回复后回填 messageId）。
+        const relay = interAgentRouter.registerRelay({
+          taskId: auth.task.taskId,
+          channelId: fromCtx.channel.id,
+          targetBotId: auth.targetBot.id,
+          targetUserId: auth.targetUserId,
+          fromBotId: fromCtx.botId,
+          fromUserId: fromInst.userId ?? '',
+          now,
+        });
+        pending.push({ relayId: relay.relayId, targetUserId: auth.targetUserId, taskId: auth.task.taskId, attached: false });
+        this.recordMentionEvent(fromCtx, auth.task.taskId, 'forwarded', auth.targetBot.id, auth.targetBot.name, auth.hop.message);
+      }
+      if (notes.length) outText = `${outText}\n\n${notes.join('\n')}`;
+      return { text: outText, pending };
+    } catch (e) {
+      console.error('[manager] deliverInlineMentions 异常（已隔离，原文发出）', e);
+      return { text, pending };
     }
   }
 
@@ -796,15 +1001,27 @@ class BotManager {
     return { ok: true, targetUserId: uid };
   }
 
-  /** 按名字（大小写不敏感）在 enabled bot 中解析目标，限定在**与发起方同项目**内；同名取最早创建。 */
+  /**
+   * 解析 mention_bot 工具的 bot_name → 同项目 enabled 同伴，限定在**与发起方同项目**内；同名取最早创建。
+   * bot_name 可为全名 / 岗位 / 「岗位-代号」（与「正文内联 @」同口径，复用 computePeerHandles + resolvePeerByHandle），
+   * 大小写不敏感——修复 bot 改短名后模型仍按岗位（@策划/@程序）转交导致 not_found 的问题。
+   */
   private resolveMentionTarget(name: string, callerProjectId: string): Bot | 'not_found' | 'not_in_project' {
     const wanted = name.trim().toLowerCase();
-    const matches = botRepo.listEnabled().filter((b) => b.name.trim().toLowerCase() === wanted);
-    if (matches.length === 0) return 'not_found';
-    matches.sort((a, b) => a.createdAt - b.createdAt);
-    const sameProject = matches.filter((b) => b.projectId && b.projectId === callerProjectId);
-    if (sameProject.length === 0) return 'not_in_project';
-    return sameProject[0]!;
+    if (!wanted) return 'not_found';
+    const enabled = botRepo.listEnabled();
+    // 同项目 enabled 同伴，按创建时间排序（同名/歧义时取最早，沿用旧语义）。
+    const peers = enabled
+      .filter((b) => b.projectId && b.projectId === callerProjectId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const resolvedName = resolvePeerByHandle(name, computePeerHandles(peers.map((b) => ({ name: b.name, role: b.role }))));
+    if (resolvedName) {
+      const bot = peers.find((b) => b.name === resolvedName);
+      if (bot) return bot;
+    }
+    // 本项目内没命中：若全局存在同名 enabled bot → not_in_project（报错更准确），否则 not_found。
+    const existsElsewhere = enabled.some((b) => b.name.trim().toLowerCase() === wanted);
+    return existsElsewhere ? 'not_in_project' : 'not_found';
   }
 
   /** 登记 relay（发送前）→ 用发起 bot 的身份在频道里发 @ 消息 → 回填 messageId。成功 true，发送失败撤销登记返回 false。 */
@@ -822,6 +1039,16 @@ class BotManager {
       const content = `<@${hop.targetUserId}> ${hop.message}`.slice(0, 2000);
       const sent = await fromCtx.channel.send(content);
       interAgentRouter.attachMessageId(relay.relayId, sent.id);
+      // 登记「等待接力回报」：对方接力后引用回复这条转交消息时，回报路由回发出转交的 bot（owner = hop.fromBotId）。
+      // expectedSenderUserIds 限定为被 @ 的目标，杜绝其它 bot 引用回复误触发回报。
+      interAgentRouter.registerReplyAwait({
+        taskId: task.taskId,
+        ownerBotId: hop.fromBotId,
+        channelId: fromCtx.channel.id,
+        messageId: sent.id,
+        expectedSenderUserIds: [hop.targetUserId],
+        now,
+      });
       return true;
     } catch (e) {
       interAgentRouter.cancelRelay(relay.relayId);

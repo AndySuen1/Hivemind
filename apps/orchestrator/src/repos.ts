@@ -110,6 +110,7 @@ type BotRow = {
   name: string;
   provider_id: string;
   system_prompt: string;
+  role: string;
   temperature: number;
   tools: string;
   allowed_requesters: string;
@@ -118,6 +119,16 @@ type BotRow = {
   created_at: number;
   updated_at: number;
 };
+
+/** 安全解析 JSON 字符串数组（坏数据/旧行 → 空数组）。供 workspace_dirs 等列用。 */
+function parseStrArr(raw: string | null | undefined): string[] {
+  try {
+    const v = JSON.parse(raw ?? '[]');
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 
 // 解析 tools JSON；坏数据/旧行（'{}'）经 botToolsSchema 补齐默认值，不让单条坏配置拖垮整库
 function parseBotTools(raw: string): Bot['tools'] {
@@ -170,6 +181,7 @@ const rowToBot = (r: BotRow): Bot => ({
   name: r.name,
   providerId: r.provider_id,
   systemPrompt: r.system_prompt,
+  role: r.role ?? '',
   temperature: r.temperature,
   tools: parseBotTools(r.tools),
   allowedRequesters: JSON.parse(r.allowed_requesters),
@@ -203,14 +215,15 @@ export const botRepo = {
     const tools = botToolsSchema.parse(input.tools ?? {});
     getDb()
       .prepare(
-        `INSERT INTO bots (id, name, provider_id, system_prompt, temperature, tools, allowed_requesters, project_id, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO bots (id, name, provider_id, system_prompt, role, temperature, tools, allowed_requesters, project_id, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
         input.name,
         input.providerId,
         input.systemPrompt ?? '你是一个友好、简洁的中文助手。',
+        input.role ?? '',
         input.temperature ?? 1.3,
         JSON.stringify(tools),
         JSON.stringify(input.allowedRequesters ?? []),
@@ -245,13 +258,14 @@ export const botRepo = {
     getDb()
       .prepare(
         `UPDATE bots
-           SET name = ?, provider_id = ?, system_prompt = ?, temperature = ?, tools = ?, allowed_requesters = ?, project_id = ?, enabled = ?, updated_at = ?
+           SET name = ?, provider_id = ?, system_prompt = ?, role = ?, temperature = ?, tools = ?, allowed_requesters = ?, project_id = ?, enabled = ?, updated_at = ?
          WHERE id = ?`
       )
       .run(
         updated.name,
         updated.providerId,
         updated.systemPrompt,
+        updated.role ?? '',
         updated.temperature,
         JSON.stringify(tools),
         JSON.stringify(updated.allowedRequesters),
@@ -296,6 +310,7 @@ type ProjectRow = {
   description: string;
   max_turns_per_task: number;
   max_cost_usd: number;
+  workspace_dirs: string;
   created_at: number;
   updated_at: number;
 };
@@ -306,6 +321,7 @@ const rowToProject = (r: ProjectRow): Project => ({
   description: r.description,
   maxTurnsPerTask: r.max_turns_per_task,
   maxCostUsd: r.max_cost_usd,
+  workspaceDirs: parseStrArr(r.workspace_dirs),
   createdAt: r.created_at,
   updatedAt: r.updated_at,
 });
@@ -326,10 +342,19 @@ export const projectRepo = {
     const now = Date.now();
     getDb()
       .prepare(
-        `INSERT INTO projects (id, name, description, max_turns_per_task, max_cost_usd, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO projects (id, name, description, max_turns_per_task, max_cost_usd, workspace_dirs, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, input.name, input.description ?? '', input.maxTurnsPerTask ?? 6, input.maxCostUsd ?? 2, now, now);
+      .run(
+        id,
+        input.name,
+        input.description ?? '',
+        input.maxTurnsPerTask ?? 6,
+        input.maxCostUsd ?? 2,
+        JSON.stringify(input.workspaceDirs ?? []),
+        now,
+        now
+      );
     if (input.memberBotIds) this.setMembers(id, input.memberBotIds);
     return this.get(id)!;
   },
@@ -341,10 +366,18 @@ export const projectRepo = {
     getDb()
       .prepare(
         `UPDATE projects
-           SET name = ?, description = ?, max_turns_per_task = ?, max_cost_usd = ?, updated_at = ?
+           SET name = ?, description = ?, max_turns_per_task = ?, max_cost_usd = ?, workspace_dirs = ?, updated_at = ?
          WHERE id = ?`
       )
-      .run(updated.name, updated.description, updated.maxTurnsPerTask, updated.maxCostUsd, updated.updatedAt, id);
+      .run(
+        updated.name,
+        updated.description,
+        updated.maxTurnsPerTask,
+        updated.maxCostUsd,
+        JSON.stringify(updated.workspaceDirs ?? []),
+        updated.updatedAt,
+        id
+      );
     if (patch.memberBotIds) this.setMembers(id, patch.memberBotIds);
     return this.get(id);
   },

@@ -162,6 +162,9 @@ export const botSchema = z.object({
   // 想用不同模型？新建一个 Provider（API key 可重复，model 不同）
   providerId: z.string(),
   systemPrompt: z.string().default('你是一个友好、简洁的中文助手。'),
+  // 岗位 / 工种（如「程序」「策划」「项目经理」）。同项目成员会在各自 system prompt 里自动看到彼此的岗位
+  // （免去在 systemPrompt 里手写团队花名册）。空 = 未设定。
+  role: z.string().max(50).default(''),
   // temperature 0~2，DeepSeek 官方建议：编程/数学 0.0，数据分析 1.0，对话/翻译 1.3，创作 1.5
   temperature: z.number().min(0).max(2).default(1.3),
   tools: botToolsSchema.default({}),
@@ -176,7 +179,7 @@ export type Bot = z.infer<typeof botSchema>;
 
 export const botCreateSchema = botSchema
   .omit({ id: true, createdAt: true, updatedAt: true })
-  .partial({ systemPrompt: true, temperature: true, tools: true, allowedRequesters: true, enabled: true })
+  .partial({ systemPrompt: true, role: true, temperature: true, tools: true, allowedRequesters: true, enabled: true })
   .extend({
     discordToken: z.string().min(1, 'Discord token 必填'),
   });
@@ -203,6 +206,9 @@ export const projectSchema = z.object({
   // 转交预算（一个项目一套，成员 bot 继承）：单条协作任务的最大转交跳数 / 累计成本上限（USD，0=不限）。
   maxTurnsPerTask: z.number().int().positive().max(20).default(6),
   maxCostUsd: z.number().nonnegative().max(100).default(2),
+  // 项目级工作目录白名单：本项目**全体成员可见**。每个成员实际可访问的目录 = 项目这份 + 它自己 tools.workspaceDirs。
+  // fs / bash / claudeCode 的访问边界都取这个并集。空 = 项目不提供共享目录（成员仍可各自配自己的）。
+  workspaceDirs: z.array(z.string()).default([]),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
 });
@@ -212,7 +218,7 @@ export type Project = z.infer<typeof projectSchema>;
 //（全量重设——未列出的现有成员会被移出）。由 projectRepo 落到 bots.project_id。
 export const projectCreateSchema = projectSchema
   .omit({ id: true, createdAt: true, updatedAt: true })
-  .partial({ description: true, maxTurnsPerTask: true, maxCostUsd: true })
+  .partial({ description: true, maxTurnsPerTask: true, maxCostUsd: true, workspaceDirs: true })
   .extend({ memberBotIds: z.array(z.string()).optional() });
 export type ProjectCreate = z.infer<typeof projectCreateSchema>;
 

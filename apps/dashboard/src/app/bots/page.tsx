@@ -259,6 +259,7 @@ function BotForm(props: BotFormProps) {
   const [name, setName] = useState('');
   const [providerId, setProviderId] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('你是一个友好、简洁的中文助手。');
+  const [role, setRole] = useState('');
   const [temperature, setTemperature] = useState(1.3);
   const [allowedRaw, setAllowedRaw] = useState('');
   const [enabled, setEnabled] = useState(true);
@@ -299,6 +300,7 @@ function BotForm(props: BotFormProps) {
     setName(existing?.name ?? '');
     setProviderId(existing?.providerId ?? firstProvider?.id ?? '');
     setSystemPrompt(existing?.systemPrompt ?? '你是一个友好、简洁的中文助手。');
+    setRole(existing?.role ?? '');
     setTemperature(existing?.temperature ?? 1.3);
     setAllowedRaw(existing?.allowedRequesters.join('\n') ?? '');
     setEnabled(existing?.enabled ?? true);
@@ -361,6 +363,7 @@ function BotForm(props: BotFormProps) {
           name,
           providerId,
           systemPrompt,
+          role,
           temperature,
           tools,
           allowedRequesters,
@@ -375,6 +378,7 @@ function BotForm(props: BotFormProps) {
           name,
           providerId,
           systemPrompt,
+          role,
           temperature,
           tools,
           projectId: projectId || null,
@@ -446,6 +450,9 @@ function BotForm(props: BotFormProps) {
           </Field>
           <Field label="系统提示词（人格/工种）">
             <Textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={4} />
+          </Field>
+          <Field label="岗位 / 工种（如 程序 / 策划 / 项目经理；同项目成员会自动看到彼此的岗位与分工，无需在提示词里手写团队名单）">
+            <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder="如：程序" />
           </Field>
           <Field
             label={`Temperature: ${temperature.toFixed(1)}（DeepSeek 官方推荐：编程/数学 0.0 · 数据分析 1.0 · 对话/翻译 1.3 · 创作 1.5）`}
