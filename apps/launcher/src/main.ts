@@ -3,7 +3,7 @@
 import { app, shell, Tray } from 'electron';
 import { getConfig, getConfigPath, loadConfig, updateConfig } from './config';
 import { ProcessManager } from './process-manager';
-import { getAutoLaunch, setAutoLaunch } from './login-item';
+import { ensureAutoLaunchHidden, getAutoLaunch, setAutoLaunch } from './login-item';
 import { startControlServer } from './control-server';
 import { createTray } from './tray';
 import type { LauncherController, PublicSettings, StatusSnapshot } from './types';
@@ -31,6 +31,7 @@ function init(): void {
   const cfg = loadConfig();
   console.log(`[main] 配置文件: ${getConfigPath()}`);
   if (process.platform === 'darwin') app.dock?.hide(); // 纯托盘应用，不在程序坞显示
+  ensureAutoLaunchHidden(); // 旧版自启会弹黑窗，启动时就地迁移为 wscript 隐藏形式
 
   const pm = new ProcessManager();
   const listeners: Array<() => void> = [];
