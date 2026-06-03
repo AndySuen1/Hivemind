@@ -10,6 +10,8 @@ dist/
 .next/
 .vscode/
 .idea/
+# TypeScript 增量构建缓存（每次 typecheck 都会变，纯构建产物，勿提交）
+*.tsbuildinfo
 
 # Claude Code 本地配置（含本机绝对路径与一次性权限规则，勿提交）
 .claude/
