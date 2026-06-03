@@ -41,7 +41,7 @@ apps/orchestrator/node_modules/.bin/tsc -p apps/orchestrator/tsconfig.json --noE
 apps/orchestrator/node_modules/.bin/tsx apps/orchestrator/pA-smoke.ts
 ```
 
-各脚本对应的功能：`p2`=可观测性埋点链路 · `p3`=委派/权限消息解析 · `p4`=查询 API · `p5`=SSE 实时推送 · `p7`=数据保留清理 · `pA`=L1 对话复原 · `pB`=L2 滚动摘要 · `pC`=L4 FTS5 检索 · `pD`=L3 触发式整理 · `pE`=字符预算裁剪 · `pG`=Inter-Agent Router（任务预算/短循环/熔断/relay 注册消费，纯逻辑无 Discord）· `pH`=Project repo（项目 CRUD + 单 bot 单项目成员语义 + 删项目置空成员）。改了相关模块就跑对应脚本验证。
+各脚本对应的功能：`p2`=可观测性埋点链路 · `p3`=委派/权限消息解析 · `p4`=查询 API · `p5`=SSE 实时推送 · `p7`=数据保留清理 · `pA`=L1 对话复原 · `pB`=L2 滚动摘要 · `pC`=L4 FTS5 检索 · `pD`=L3 触发式整理 · `pE`=字符预算裁剪 · `pG`=Inter-Agent Router（任务预算/短循环/熔断/relay 注册消费，纯逻辑无 Discord）· `pH`=Project repo（项目 CRUD + 单 bot 单项目成员语义 + 删项目置空成员）· `pJ`=Skill 加载器（listSkills/frontmatter/路径穿越/composeSkillsPrompt）· `pK`=调度器（register 合法性/幂等/unregister/invoke 防重入）· `pL`=discord_push 白名单（命中/非白名单/缺上下文/fail-closed/发送失败）。改了相关模块就跑对应脚本验证。
 
 ## 仓库结构
 
@@ -72,6 +72,14 @@ packages/shared     @hivemind/shared        跨包 Zod schema + TS 类型（唯�
 - `bot-manager.deliverMention`（编排 Discord 副作用）：解析目标限定**同项目** enabled bot → 在线 → **目标按人类发起人做访问控制**（接力回合的唯一访问闸门，防 confused-deputy）→预算（项目）/循环/熔断检查。受阻 → `pauseTask` + 向发起人弹「继续/终止」按钮（`askResume`，仅 rootRequester）；继续会**重新校验在线+访问**后只放行这一跳。`buildBotToolRuntime` 仅在 bot 有 projectId 且项目里有同伴时装配 `mention_bot`（同伴名单进静态提示）。
 - ⚠️ 项目成员/归属变更（`/api/projects/*` 或 bot 的 projectId 改动）会**重启受影响的 bot 实例**（刷新同伴名单 + 工具装配）；预算/项目名改动不重启（转交时实时读项目预算）。
 - 链状态只在内存、**绝不进 LLM history**（铁律）；经 `experimental_context.mention` 传 `{taskId}`（接力）或 `{root}`（人类回合，首次转交才惰性开链；同回合后续调用写回 `taskId` 复用同链预算）。委派成本经 `delegate_to_claude` 回灌全局熔断 + 任务预算。
+
+### Skill 系统 + 调度器（Phase 3.5，`skills.ts` / `scheduler.ts` / `tools/discord-push.ts`）
+- **Skill = 受信资产，事实源在文件系统**：共享目录 `SKILL_ROOT/<name>/SKILL.md`（默认仓库父目录 `skills/`，与 `bot-memory/` 同级，env `SKILL_ROOT` 覆盖），YAML frontmatter 存 name/description。库里只存 `bots.skills: string[]`（启用了哪些名，migration 0010）。`buildBotToolRuntime` 把启用 skill 的 `SKILL.md` 经 `composeSkillsPrompt` 拼到 `staticPromptSuffix` 末尾——**直接当指令、不套「参考数据」外壳**（信任级同 systemPrompt，与 L2/L4 历史注入区别对待）；并把启用 skill 的目录并入 path-guard `workspaceDirs`，使 SKILL.md 引用的脚本可被 fs/bash 读。skill 名严格 `SKILL_NAME_RE`（小写 kebab）防 `join` 路径穿越。
+- **discord_push 工具**：`bot.tools.discordPush.{enabled,channelIds}`。bot 主动推消息到白名单频道，经 `experimental_context.push`（`DiscordPushContext`，由 `BotInstance.buildPushContext` 注入，含绑定本 bot client 的 `sendToChannel`）。工具 execute 内做白名单校验（fail-closed：空=全拒），不抛、以「错误：」串返回。
+- **调度器**：`scheduler.ts` 全局单例（node-cron v4，`noOverlap`+`running` Set 双重防重入，env `SCHEDULER_TZ` 默认 `Asia/Shanghai`）。**单向依赖**——不 import bot-manager；`BotInstance.start()` 末尾 `scheduler.register(this.bot, fire)`、`stop()` 开头 `unregister`，故 `restart()`(=stop+start) 自动「注销旧 cron + 注册新」。`bots.schedule: [{cron,prompt,targetChannelId?,enabled}]`（JSON 列，migration 0010）。
+- **合成回合 `BotInstance.runSyntheticTurn`**（调度触发 + Dashboard 手动触发/测试运行共用，经 `BotManager.triggerBot`）：**不复用 `handleMessage`**（它私有且强依赖 Discord `Message`），而是经 `channelQueues` 串行 → 空历史 + 现算 system prompt（含已加载 skill）跑 `generateAgentReply` → 记 `schedule_trigger` 事件。`targetChannelId` 有值则最终回复直发该频道（平台授权，**不经** discordPush 白名单）；空则发哪靠 skill 内 `discord_push`。不写 `this.history`（不污染人类对话窗口）。
+- **重启纪律**：`skills`/`schedule`/`tools.discordPush` 都进 BotInstance 启动快照，改了必须重启实例（`api.ts` 的 `needsRestart` 已纳入 `skills`/`schedule`；`tools` 改动已覆盖 discordPush）。skills/schedule 是 bot 私有，不触发 `restartProjectPeers`。
+- **API/UI**：`api-skills.ts`（skill CRUD + `GET /api/schedules` 聚合 + 手动触发，`:name` 经 `SKILL_NAME_RE` 防穿越）；Dashboard `/skills` 页（编辑/调度/测试运行）+ bots 编辑页「技能·调度」tab。冒烟 `pJ`/`pK`/`pL`。
 
 ### 四层对话记忆（重启后仍能接上）
 1. **L1** 近期逐字窗口（`bot-manager.ts`，每频道内存 history，重启首次见到该频道时从 `messages` 表复原）

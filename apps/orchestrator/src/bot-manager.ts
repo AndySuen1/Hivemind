@@ -1,11 +1,12 @@
-import { Client, GatewayIntentBits, Partials, type Message } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, type Message, type SendableChannels } from 'discord.js';
 import type { LanguageModel, ModelMessage } from 'ai';
-import type { Bot, BotRuntimeInfo } from '@hivemind/shared';
+import type { Bot, BotRuntimeInfo, ScheduleItem, ScheduleRunAck } from '@hivemind/shared';
 import { botRepo, providerRepo, projectRepo } from './repos.js';
 import { createLlmModel, generateAgentReply } from './llm.js';
 import { buildBotToolRuntime, composeSystemPrompt, type BotToolRuntime, type PromptExtras } from './tools/index.js';
 import type { DelegationContext } from './claude/delegation.js';
-import type { MentionExperimentalContext } from './tools/mention-bot.js';
+import type { MentionExperimentalContext, DiscordPushContext } from './tools/mention-bot.js';
+import { scheduler } from './scheduler.js';
 import { interAgentRouter, InterAgentRouter, type CheckResult } from './inter-agent/router.js';
 import type { DeliverMentionArgs, DeliverMentionResult, MentionChainContext, MentionTask, PendingHop } from './inter-agent/types.js';
 import { computePeerHandles, scanPeerMentions, rewriteHandles, resolveMentionsReadable, resolvePeerByHandle } from './inter-agent/inline-mention.js';
@@ -76,6 +77,12 @@ export function budgetHistoryByChars(msgs: ModelMessage[], maxChars: number): Mo
   }
   return startIdx > 0 ? msgs.slice(startIdx) : msgs;
 }
+
+// 合成回合（调度器/手动触发）的「发起人」：非外部用户，跳过访问控制（调度是平台配置的）。
+const SCHEDULER_REQUESTER = '__scheduler__';
+
+/** runSyntheticTurn 的结果（与 shared ScheduleRunAck 对齐，缺 botId 由 manager 补）。 */
+type SyntheticTurnResult = Omit<ScheduleRunAck, 'botId'>;
 
 class BotInstance {
   private client: Client;
@@ -178,6 +185,10 @@ class BotInstance {
         CONSOLIDATE_ENABLED && this.bot.tools.memory.enabled && this.summaryActive && !!this.toolRuntime.memoryDir;
 
       await this.client.login(token);
+
+      // Phase 3.5：注册本 bot 的定时任务（按构造时快照的 bot.schedule）。改 schedule 要重启实例（restart=stop+start
+      // 自动「注销旧 + 注册新」）。非法 cron / disabled 项由 scheduler 跳过。
+      scheduler.register(this.bot, (item, index) => this.runScheduledItem(item, index));
     } catch (e) {
       this.status = 'error';
       this.errorMessage = (e as Error).message;
@@ -187,6 +198,8 @@ class BotInstance {
   }
 
   async stop(): Promise<void> {
+    // 先注销定时任务（防停机后 cron 还触发已断开的实例），再中止在跑回合、断开 client。
+    scheduler.unregister(this.bot.id);
     // 先中止所有在跑的委派（杀 Claude 子进程 + 取消待处理的 Discord 交互），再断开 client
     for (const ac of this.active) ac.abort();
     this.active.clear();
@@ -379,6 +392,8 @@ class BotInstance {
           mention: relayChain ?? {
             root: { rootRequesterId: requesterId, rootBotId: this.bot.id, channelId: chanId },
           },
+          // discord_push：让 bot 主动推到白名单频道（启用了才注入；未启用为 undefined，工具也不会装配）
+          push: this.buildPushContext(),
         }
       : undefined;
 
@@ -472,16 +487,17 @@ class BotInstance {
       // Bug2：把回复正文里「@同项目同伴名」的纯文本转成真实 <@id> 提及 + 登记转交 relay，让对方接力处理。
       // （DeepSeek 常按系统提示在正文里内联 @ 派活而非走 mention_bot 工具；这一步让两种写法都能真正触发对方，
       // 并修复「@ 出现在消息中间时失败」。）best-effort：失败则原文照发、不触发内联，不打断回复。
-      // **回报回合（isReport）不再扇出**：bot 在回报/确认正文里常写「@PM-Louie 已完成」「@策划 谢谢」这类
-      // 引用性 @，若也当真转交会级联放大（实测 35s 几十条风暴的直接推手）。回报是收尾汇报，要再派活应显式调
-      // mention_bot 工具，不靠回报正文的内联 @ 自动触发。
+      // **回报回合精准放开**：回报回合也扇出内联 @，但排除「刚给我回报的那个 bot」(fromBotId)——既修「PM 收到
+      // 方案回报后转头 @ 程序派新活被静默吞掉」，又挡住「@ 回报者」这条 ping-pong 主链（旧 B2 整轮跳过的初衷，
+      // 实测 35s 几十条风暴的源头）。残余风暴风险由 @纪律提示 + 同一目标跳数上限 + 短循环检测兜底。
       let outText = replyText;
-      if (experimentalContext && !isReport) {
+      if (experimentalContext) {
         const res = botManager.deliverInlineMentions(
           experimentalContext.discord!,
           experimentalContext.mention!,
           replyText,
-          Date.now()
+          Date.now(),
+          isReport ? fromBotId : undefined
         );
         outText = res.text;
         inlinePending = res.pending;
@@ -650,6 +666,204 @@ class BotInstance {
     for (const c of candidates) {
       await this.consolidateSession(c.sessionId); // 串行（consolidating 守护）
     }
+  }
+
+  // ============================================================
+  // Phase 3.5：discord_push 推送 + 调度/手动触发的合成回合
+  // ============================================================
+
+  /** 取一个可发送的频道（缓存优先，再 fetch）。不可用 → null。 */
+  private async fetchSendableChannel(channelId: string): Promise<SendableChannels | null> {
+    try {
+      const ch = this.client.channels.cache.get(channelId) ?? (await this.client.channels.fetch(channelId));
+      return ch && ch.isSendable() ? ch : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 把内容发到指定频道（discord_push 工具与调度直发的底层发送原语）。禁 @everyone/@role（allowedMentions parse:[]），
+   * 超 1900 自动分块。不抛——返回 {ok,error}。白名单校验由调用方（工具 execute 已查 / 调度直发系平台授权）负责。
+   */
+  async sendToChannel(channelId: string, content: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const channel = await this.fetchSendableChannel(channelId);
+      if (!channel) return { ok: false, error: '频道不存在或不可发送' };
+      for (const chunk of chunkText(content, 1900)) {
+        await channel.send({ content: chunk, allowedMentions: { parse: [] } });
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }
+
+  /** 启用 discord_push 时构造注入工具的推送上下文（白名单 + 绑定本 bot 的发送闭包）；未启用 → undefined。 */
+  private buildPushContext(): DiscordPushContext | undefined {
+    if (!this.bot.tools.discordPush.enabled) return undefined;
+    return {
+      botId: this.bot.id,
+      allowedChannelIds: this.bot.tools.discordPush.channelIds,
+      sendToChannel: (channelId, text) => this.sendToChannel(channelId, text),
+    };
+  }
+
+  /** cron 到点触发：跑 schedule 第 index 项。best-effort（runSyntheticTurn 内部已兜异常）。 */
+  private async runScheduledItem(item: ScheduleItem, index: number): Promise<void> {
+    await this.runSyntheticTurn(item.prompt, {
+      source: 'schedule',
+      targetChannelId: item.targetChannelId,
+      cron: item.cron,
+    });
+  }
+
+  /**
+   * 合成回合（调度器 / Dashboard 手动触发共用）：不依赖 Discord Message，复用 generateAgentReply 核心跑一回合。
+   * 经 channelQueues 串行（键 = targetChannelId 或合成键），避免与该频道普通消息并发读改写 history。
+   * 不写入 this.history（不污染人类对话窗口）；以空历史 + 现算 system prompt（含已加载 skill）运行。
+   * targetChannelId 有值 → 最终回复直接发该频道（平台授权，不经 discord_push 白名单）；空 → 发哪靠 skill 内 discord_push。
+   */
+  async runSyntheticTurn(
+    prompt: string,
+    opts: { source: 'schedule' | 'manual'; targetChannelId?: string; cron?: string }
+  ): Promise<SyntheticTurnResult> {
+    if (this.status !== 'online' || !this.model || !this.toolRuntime) {
+      return { status: 'offline', message: 'bot 未在线' };
+    }
+    const queueKey = opts.targetChannelId ?? `synthetic:${this.bot.id}`;
+    return this.enqueueOnChannel(queueKey, () => this.doSyntheticTurn(prompt, opts));
+  }
+
+  private async doSyntheticTurn(
+    prompt: string,
+    opts: { source: 'schedule' | 'manual'; targetChannelId?: string; cron?: string }
+  ): Promise<SyntheticTurnResult> {
+    if (!this.model || !this.toolRuntime) return { status: 'error', message: '未就绪' };
+
+    const ac = new AbortController();
+    this.active.add(ac);
+    const channel = opts.targetChannelId ? await this.fetchSendableChannel(opts.targetChannelId) : null;
+    const channelId = opts.targetChannelId ?? `synthetic:${this.bot.id}`;
+    const isManual = opts.source === 'manual';
+
+    const sessionId = recorder.ensureSession({
+      botId: this.bot.id,
+      channelId,
+      channelType: opts.targetChannelId ? undefined : 'scheduled',
+      title: `[${isManual ? '手动' : '定时'}] ${prompt.slice(0, 60)}`,
+    });
+    const runId = recorder.startRun({ sessionId, botId: this.bot.id, requesterId: SCHEDULER_REQUESTER });
+    recorder.recordEvent({
+      runId,
+      sessionId,
+      botId: this.bot.id,
+      type: 'schedule_trigger',
+      label: isManual ? '▶️ 手动触发' : '⏰ 定时触发',
+      status: 'received',
+      input: { source: opts.source, prompt, cron: opts.cron, targetChannelId: opts.targetChannelId },
+    });
+    recorder.recordMessage({
+      sessionId,
+      runId,
+      botId: this.bot.id,
+      role: 'user',
+      content: prompt,
+      authorName: isManual ? '手动触发' : '调度器',
+    });
+
+    try {
+      const experimentalContext: MentionExperimentalContext = {
+        push: this.buildPushContext(),
+        // 仅当有可发送频道时给 discord 上下文（delegate/mention 需 channel）；无则这些工具本回合不可用，discord_push 仍可用。
+        ...(channel
+          ? {
+              discord: {
+                botId: this.bot.id,
+                botName: this.bot.name,
+                requesterId: SCHEDULER_REQUESTER,
+                channel,
+                signal: ac.signal,
+                runId,
+                sessionId,
+              },
+            }
+          : {}),
+      };
+      const systemPrompt = composeSystemPrompt(this.bot, this.toolRuntime);
+      const { text, usage, toolCallCount, finishReason } = await generateAgentReply({
+        model: this.model,
+        systemPrompt,
+        history: [],
+        userText: prompt,
+        tools: this.toolRuntime.tools,
+        temperature: this.bot.temperature,
+        experimentalContext,
+        abortSignal: ac.signal,
+        onToolResult: (r) => {
+          if (r.toolName === 'delegate_to_claude') return;
+          recorder.recordEvent({
+            runId,
+            sessionId,
+            botId: this.bot.id,
+            type: 'tool_call',
+            toolName: r.toolName,
+            label: localToolLabel(r.toolName),
+            status: isToolError(r.output) ? 'error' : 'ok',
+            input: shapeToolInput(r.toolName, r.input),
+            output: r.output,
+          });
+        },
+      });
+
+      const replyText = text.trim();
+      recorder.recordMessage({
+        sessionId,
+        runId,
+        botId: this.bot.id,
+        role: 'assistant',
+        content: replyText || '（本回合无文本输出）',
+      });
+
+      // targetChannelId 直发：把最终回复发到该频道（平台授权，禁 @everyone/@role）。best-effort。
+      if (channel && replyText) {
+        for (const chunk of chunkText(replyText, 1900)) {
+          await channel
+            .send({ content: chunk, allowedMentions: { parse: [] } })
+            .catch((e) => console.error(`[bot:${this.bot.name}] 合成回合直发失败（已忽略）`, e));
+        }
+      }
+
+      recorder.endRun(runId, { status: 'ok', finishReason, toolCallCount, usage });
+      console.log(`[bot:${this.bot.name}] 合成回合(${opts.source}) -> ${prompt.slice(0, 50)} | tools: ${toolCallCount}`);
+      return { status: 'triggered', runId, sessionId };
+    } catch (e) {
+      if (ac.signal.aborted) {
+        recorder.endRun(runId, { status: 'aborted' });
+        return { status: 'error', message: '已中止', runId, sessionId };
+      }
+      recorder.recordEvent({ runId, sessionId, botId: this.bot.id, type: 'error', status: 'error', output: (e as Error).message });
+      recorder.endRun(runId, { status: 'error', error: (e as Error).message });
+      console.error(`[bot:${this.bot.name}] 合成回合失败`, e);
+      return { status: 'error', message: (e as Error).message, runId, sessionId };
+    } finally {
+      this.active.delete(ac);
+    }
+  }
+
+  /** 把一个任务挂到某频道的串行队列尾（与该频道普通消息串行），返回任务结果。链尾异常不破坏队列。 */
+  private enqueueOnChannel<T>(chanId: string, task: () => Promise<T>): Promise<T> {
+    const prev = this.channelQueues.get(chanId) ?? Promise.resolve();
+    const run = prev.then(() => task());
+    // 队列链保持 Promise<void> 且永不 reject（吞掉），否则后续入队会被前一个失败阻断。
+    this.channelQueues.set(
+      chanId,
+      run.then(
+        () => undefined,
+        () => undefined
+      )
+    );
+    return run;
   }
 }
 
@@ -908,28 +1122,34 @@ class BotManager {
    * （调用方发出回复后按消息块回填 + 登记 replyAwait，使对方回报能路由回本 bot）。
    * 名字匹配：精确全名 + （唯一时）'-' 前缀别名。best-effort：异常整体兜住、原文照发；未授权/离线/未找到的 @
    * 保留原文文本、不触发，不打断回复。
+   * `excludeBotId`：回报回合传入「刚给我回报的同伴 bot」——其 @ 不转发（防 PM↔worker / A↔B ping-pong），
+   * 但 @ 其它同伴（=收到回报后转头派新活，PM 的典型工作流）仍照常转发。非回报回合不传，无排除。
    */
   deliverInlineMentions(
     fromCtx: DelegationContext,
     chain: MentionChainContext,
     text: string,
-    now: number
+    now: number,
+    excludeBotId?: string
   ): { text: string; pending: InlinePendingRelay[] } {
     const pending: InlinePendingRelay[] = [];
     try {
       const fromInst = this.instances.get(fromCtx.botId);
       const projectId = fromInst?.getBot().projectId;
       if (!fromInst || !projectId) return { text, pending };
-      const peers = computePeerHandles(
-        botRepo.listByProject(projectId).filter((b) => b.id !== fromCtx.botId && b.enabled)
-      );
+      const coBots = botRepo.listByProject(projectId).filter((b) => b.id !== fromCtx.botId && b.enabled);
+      const peers = computePeerHandles(coBots);
       if (peers.length === 0) return { text, pending };
       const found = scanPeerMentions(text, peers);
       if (found.size === 0) return { text, pending };
+      // 规范名（= scanPeerMentions 输出键）→ botId，供 excludeBotId 在 authorizeAndCommitHop（会 commit 跳数）之前判定排除。
+      const nameToId = new Map(coBots.map((b) => [b.name.trim(), b.id]));
 
       let outText = text;
       const notes: string[] = [];
       for (const [peerName, handles] of found) {
+        // 回报回合：跳过「@ 回刚给我回报的同伴」（防 ping-pong），其 @ 保留为原文文本、不转发；其余同伴照常。
+        if (excludeBotId && nameToId.get(peerName) === excludeBotId) continue;
         const auth = this.authorizeAndCommitHop(fromCtx, chain, peerName, text, now);
         if (!auth.ok) {
           // 受阻（预算/循环/熔断）：authorizeAndCommitHop 已暂停 + 异步弹按钮，正文追加一句提示；
@@ -1155,6 +1375,27 @@ class BotManager {
       } catch (e) {
         console.error('[manager] 空闲整理失败（已忽略）', e);
       }
+    }
+  }
+
+  /**
+   * Phase 3.5：手动触发某 bot 跑一回合（Dashboard「手动触发调度 / 测试运行」用）。
+   * fire-and-forget：spawn 一次合成回合，过程实时进 recorder（去监控页看结果），立即返回 ack。
+   * bot 未在线 → status:'offline'。targetChannelId 有值则结果直发该频道。
+   */
+  async triggerBot(
+    botId: string,
+    opts: { prompt: string; targetChannelId?: string }
+  ): Promise<ScheduleRunAck> {
+    const inst = this.instances.get(botId);
+    if (!inst || inst.getStatus().status !== 'online') {
+      return { botId, status: 'offline', message: 'bot 未在线，请先在 Bots 页启用并等待上线。' };
+    }
+    try {
+      const res = await inst.runSyntheticTurn(opts.prompt, { source: 'manual', targetChannelId: opts.targetChannelId });
+      return { botId, ...res };
+    } catch (e) {
+      return { botId, status: 'error', message: (e as Error).message };
     }
   }
 }

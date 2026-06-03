@@ -123,6 +123,15 @@ export const claudeCodeToolConfigSchema = z.object({
 });
 export type ClaudeCodeToolConfig = z.infer<typeof claudeCodeToolConfigSchema>;
 
+// discord_push 工具（Phase 3.5）：让 bot 主动把消息推送到指定 Discord 频道，无需等用户先问
+//（常用于定时播报、任务完成通知）。channelIds 是允许推送的目标频道白名单——fail-closed：
+// 空白名单 = 全部拒绝。工具内只能推到白名单内的频道（调度器「直发」走另一条平台授权入口，不经此白名单）。
+export const discordPushToolConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  channelIds: z.array(z.string()).default([]),
+});
+export type DiscordPushToolConfig = z.infer<typeof discordPushToolConfigSchema>;
+
 // 注：Phase 3「Inter-Agent 协作（mention_bot）」不再是 per-bot 工具配置——改由「项目」分组驱动：
 // 同一项目（bot.projectId 相同）的 bot 自动可互相 @，转交预算挂在项目上（见 projectSchema 与 inter-agent/）。
 
@@ -135,6 +144,7 @@ export const botToolsSchema = z.object({
   conversationMemory: conversationMemoryConfigSchema.default({}),
   webSearch: webSearchToolConfigSchema.default({}),
   claudeCode: claudeCodeToolConfigSchema.default({}),
+  discordPush: discordPushToolConfigSchema.default({}),
 });
 export type BotTools = z.infer<typeof botToolsSchema>;
 
@@ -148,8 +158,27 @@ export const botToolsPartialSchema = z.object({
   conversationMemory: conversationMemoryConfigSchema.partial().optional(),
   webSearch: webSearchToolConfigSchema.partial().optional(),
   claudeCode: claudeCodeToolConfigSchema.partial().optional(),
+  discordPush: discordPushToolConfigSchema.partial().optional(),
 });
 export type BotToolsPartial = z.infer<typeof botToolsPartialSchema>;
+
+// ============================================================
+// Skill / Schedule（Phase 3.5：技能系统 + 调度器）
+// ============================================================
+
+// skill 名校验：小写 kebab，禁 '.'/'/'/'\\'，防 join(SKILL_ROOT, name) 路径穿越（前后端共用）。
+export const SKILL_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+// 一条定时任务：cron 到点把 prompt 当一回合注入 bot 触发执行。
+// targetChannelId 有值 → bot 的最终回复直接发该频道（平台授权，不经 discordPush 白名单）；
+// 空 → 只跑一回合，发到哪由 skill 内部调 discord_push 决定。enabled=false 的项注册时跳过。
+export const scheduleItemSchema = z.object({
+  cron: z.string().min(1).max(120),
+  prompt: z.string().min(1).max(4000),
+  targetChannelId: z.string().optional(),
+  enabled: z.boolean().default(true),
+});
+export type ScheduleItem = z.infer<typeof scheduleItemSchema>;
 
 // ============================================================
 // Bot（一个 Discord 身份 + 模型 + 工具配置）
@@ -171,6 +200,10 @@ export const botSchema = z.object({
   allowedRequesters: z.array(z.string()).default([]),
   // 所属项目（Inter-Agent 协作分组）。null = 不在任何项目，无法跨 bot 协作。同项目的 bot 自动可互相 @。
   projectId: z.string().nullable().default(null),
+  // 启用的 skill 名列表（对应共享 SKILL_ROOT/<name>/SKILL.md）。库里只存名字，内容是文件系统事实源。
+  skills: z.array(z.string()).default([]),
+  // 该 bot 的定时任务。改了要重启实例（调度器在 start 时按快照注册 cron）。
+  schedule: z.array(scheduleItemSchema).default([]),
   enabled: z.boolean().default(false),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
@@ -179,7 +212,7 @@ export type Bot = z.infer<typeof botSchema>;
 
 export const botCreateSchema = botSchema
   .omit({ id: true, createdAt: true, updatedAt: true })
-  .partial({ systemPrompt: true, role: true, temperature: true, tools: true, allowedRequesters: true, enabled: true })
+  .partial({ systemPrompt: true, role: true, temperature: true, tools: true, allowedRequesters: true, skills: true, schedule: true, enabled: true })
   .extend({
     discordToken: z.string().min(1, 'Discord token 必填'),
   });
@@ -268,6 +301,7 @@ export const observEventTypeSchema = z.enum([
   'permission_decision',// 用户在 Discord 的裁决（allow/deny/timeout/aborted）
   'ask_question',       // AskUserQuestion 反问及收集到的答案
   'mention',            // Inter-Agent 协作：一次跨 bot 转交（forwarded/received/paused_*/denied/not_found…）
+  'schedule_trigger',   // 调度器/手动触发的一次合成回合开始（Phase 3.5）
   'error',              // 运行错误
   'rate_limit',         // 订阅限流事件
 ]);
@@ -419,4 +453,41 @@ export interface LiveOverviewBot {
 export interface LiveOverview {
   ts: number;
   bots: LiveOverviewBot[];
+}
+
+// ============================================================
+// Skill / Schedule API 响应（Phase 3.5）
+// ============================================================
+
+// 共享 skill 概览（列表用）：name + frontmatter 的 description。
+export interface SkillSummary {
+  name: string;
+  description: string;
+  updatedAt?: number; // SKILL.md 文件 mtime（best-effort）
+}
+
+// 单个 skill 详情：概览 + SKILL.md 全文（含 frontmatter）。
+export interface SkillDetail extends SkillSummary {
+  content: string;
+}
+
+// 调度面板：把所有 bot 的 schedule 扁平化，每行带归属 bot 与在线状态。
+export interface BotScheduleEntry {
+  botId: string;
+  botName: string;
+  index: number;        // 在该 bot schedule 数组中的下标（手动触发用）
+  cron: string;
+  prompt: string;
+  targetChannelId?: string;
+  enabled: boolean;
+  botOnline: boolean;   // 离线时手动触发按钮禁用
+}
+
+// 手动触发/测试运行的确认（fire-and-forget：过程实时进 recorder，去监控页看结果）。
+export interface ScheduleRunAck {
+  botId: string;
+  status: 'triggered' | 'offline' | 'error';
+  message?: string;
+  runId?: string;
+  sessionId?: string;
 }

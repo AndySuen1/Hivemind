@@ -38,6 +38,8 @@ export function localToolLabel(name: string): string {
       return '🔧 执行命令';
     case 'web_search':
       return '🌐 联网搜索';
+    case 'discord_push':
+      return '📤 主动推送';
     case 'delegate_to_claude':
       return '🤖 委派 Claude Code'; // P3 会补 delegate_start/step/end 细粒度事件
     default:

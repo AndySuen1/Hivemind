@@ -79,8 +79,8 @@ hivemind/
 - [x] 重命名为 Hivemind
 - [x] 对话记忆四层：重启复原 / 滚动摘要 / FTS5 检索 / 触发式固化整理
 - [x] Phase 3：Inter-Agent（bot 之间 @ 协作）—— 把员工 bot 编进**项目**（同项目自动可互相 @，免配白名单）；`mention_bot` 在频道里真实 @ 同项目同伴接力（异步即发即走）；Inter-Agent Router 管控转交跳数 / 累计成本 / 短循环（A→B→A→B）检测 / 全局日成本熔断（预算挂在项目上），受阻则暂停并 @ 发起人给「继续 / 终止」按钮
+- [x] Phase 3.5：Skill 系统 + 调度器 —— 共享 `SKILL.md`（受信注入 system prompt）+ `discord_push`（白名单主动推送）+ 调度器（node-cron 定时把 prompt 当一回合注入触发，结果可直发频道或经 discord_push）；Dashboard「技能」页（编辑 SKILL.md / 调度面板 / 测试运行）+ bot 编辑页「技能·调度」分配；示例 skill `daily-status`
 
 **待办**
-- [ ] Phase 3.5：Skill 系统 + 调度器
 - [ ] Phase 4.5：RAG（可选）
 - [ ] Phase 5：免环境一键打包（standalone + 随包 Node + 代码签名）+ 上线

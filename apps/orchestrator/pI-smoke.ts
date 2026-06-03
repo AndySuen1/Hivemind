@@ -8,6 +8,7 @@
 import {
   prefixAlias,
   computePeerHandles,
+  computePromotedHandles,
   scanPeerMentions,
   rewriteHandles,
   resolveMentionsReadable,
@@ -264,6 +265,51 @@ console.log('— B1 resolveMentionsReadable（接收方可读化）—');
     '接力回合保留自己 <@self> → @自己名',
     resolveMentionsReadable('<@333> 请实现登录', undefined, (id) => ({ '333': '程序-Juanda' })[id]) === '@程序-Juanda 请实现登录'
   );
+}
+
+// ============================================================
+// computePromotedHandles：面向模型展示、要求其照抄的「@名字 / @岗位-代号」二选一句柄。
+// 核心保证：展示的每个 handle 都必须能被 scanPeerMentions/resolvePeerByHandle 命中（展示=可解析，不漂移）。
+console.log('— computePromotedHandles（展示句柄=可解析句柄）—');
+{
+  // 现网三 bot（站在 Dannis 视角看同伴 = Louie + Juanda）
+  const peersInput = [
+    { name: 'Louie', role: '项目经理' },
+    { name: 'Juanda', role: '程序' },
+  ];
+  const promoted = computePromotedHandles(peersInput);
+  const byName = Object.fromEntries(promoted.map((p) => [p.name, p.handles]));
+  check('Louie 句柄=[Louie, 项目经理-Louie]', JSON.stringify(byName['Louie']) === JSON.stringify(['Louie', '项目经理-Louie']), byName);
+  check('Juanda 句柄=[Juanda, 程序-Juanda]', JSON.stringify(byName['Juanda']) === JSON.stringify(['Juanda', '程序-Juanda']), byName);
+  check('名字恒在前（首项=name）', promoted.every((p) => p.handles[0] === p.name), promoted);
+
+  // 防漂移钉死：展示的每个 handle 一定能被两条路命中、且都解析回该同伴
+  const handlesPeers = computePeerHandles(peersInput);
+  for (const p of promoted) {
+    for (const h of p.handles) {
+      check(`@${h} 可被 resolvePeerByHandle 解析回 ${p.name}`, resolvePeerByHandle(h, handlesPeers) === p.name);
+      check(`@${h} 可被 scanPeerMentions 命中 ${p.name}`, scanPeerMentions(`@${h}`, handlesPeers).has(p.name));
+    }
+  }
+}
+{
+  // 无岗位 → 只剩名字（无「岗位-代号」形式）
+  const promoted = computePromotedHandles([{ name: 'Solo' }]);
+  check('无岗位 → 仅 [Solo]', JSON.stringify(promoted[0]!.handles) === JSON.stringify(['Solo']), promoted);
+}
+{
+  // role 为空白字符串 → 同样退化为仅名字
+  const promoted = computePromotedHandles([{ name: 'X', role: '   ' }]);
+  check('role 空白 → 仅 [X]', JSON.stringify(promoted[0]!.handles) === JSON.stringify(['X']), promoted);
+}
+{
+  // 「岗位-代号」被唯一性过滤丢弃 → 回退到仅名字。构造：combo「程序-Juanda」恰等于另一同伴的全名 → 被 fullNames 过滤。
+  const promoted = computePromotedHandles([
+    { name: 'Juanda', role: '程序' }, // combo = 程序-Juanda
+    { name: '程序-Juanda' }, // 全名恰好撞 combo → combo 在 computePeerHandles 里被丢
+  ]);
+  const byName = Object.fromEntries(promoted.map((p) => [p.name, p.handles]));
+  check('combo 撞同伴全名 → Juanda 回退到仅 [Juanda]', JSON.stringify(byName['Juanda']) === JSON.stringify(['Juanda']), byName);
 }
 
 console.log(`\npI Inter-Agent bug 修复冒烟：${pass} 通过 / ${fail} 失败`);

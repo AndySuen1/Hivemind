@@ -66,6 +66,39 @@ export function computePeerHandles(peers: { name: string; role?: string }[]): Pe
   });
 }
 
+/** 面向模型展示、要求其照抄的「规范 @ 句柄」：完整名 + （若存在且可解析的）「岗位-代号」形式。 */
+export interface PromotedHandle {
+  /** 同伴规范名（= bot.name）。 */
+  name: string;
+  /** 1~2 个建议句柄（不含 @）：`[name]` 或 `[name, `${role}-${name}`]`。每个都保证能被 scan/resolve 命中。 */
+  handles: string[];
+}
+
+/**
+ * 计算「推荐写法」句柄：给每个同伴算出要在系统提示里摆给模型照抄的合法 @ 句柄。规则是只宣传两种形式——
+ * `@名字`（= bot.name）与 `@岗位-代号`（= `${role}-${name}`）。
+ *
+ * 可靠性保证（关键）：本函数复用 computePeerHandles 的输出来挑句柄——`name` 自身永远进 handleToName（必命中），
+ * 「岗位-代号」仅当它确实出现在该同伴的 `aliases`（即未被唯一性过滤丢弃）时才采用。因此本函数产出的每个 handle
+ * 都一定能被 scanPeerMentions（内联扫描）与 resolvePeerByHandle（工具解析）命中——展示串 == 可解析串，不漂移。
+ *
+ * 退化：role 为空、或 `${role}-${name}` 被唯一性过滤丢弃（如多个同伴产出同一 combo、combo 撞了某同伴全名）时，
+ * 该同伴自然只剩 `[name]`，无需特殊回退分支。
+ */
+export function computePromotedHandles(peers: { name: string; role?: string }[]): PromotedHandle[] {
+  const computed = computePeerHandles(peers);
+  return peers.map((p, i) => {
+    const name = p.name.trim();
+    const handles = [name];
+    const role = (p.role ?? '').trim();
+    if (role) {
+      const combo = `${role}-${name}`;
+      if (combo !== name && computed[i]!.aliases.includes(combo)) handles.push(combo);
+    }
+    return { name, handles };
+  });
+}
+
 /**
  * 工具路径（mention_bot(bot_name)）用：把调用方给的 bot_name（可能是全名 / 岗位 / 「岗位-代号」）解析成
  * 唯一同伴的**规范名**（= bot.name）。复用 computePeerHandles 的句柄口径，使「内联 @」与「mention_bot 工具」

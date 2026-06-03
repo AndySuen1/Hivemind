@@ -18,6 +18,8 @@ import {
   conversationMemoryConfigSchema,
   webSearchToolConfigSchema,
   claudeCodeToolConfigSchema,
+  discordPushToolConfigSchema,
+  scheduleItemSchema,
 } from '@hivemind/shared';
 import { getDb } from './db.js';
 import { setSecret, getSecret, deleteSecret, secretAccount } from './secrets.js';
@@ -115,6 +117,8 @@ type BotRow = {
   tools: string;
   allowed_requesters: string;
   project_id: string | null;
+  skills: string;
+  schedule: string;
   enabled: number;
   created_at: number;
   updated_at: number;
@@ -173,7 +177,24 @@ function parseBotTools(raw: string): Bot['tools'] {
     conversationMemory: section(conversationMemoryConfigSchema, o.conversationMemory),
     webSearch: section(webSearchToolConfigSchema, o.webSearch),
     claudeCode: section(claudeCodeToolConfigSchema, o.claudeCode),
+    discordPush: section(discordPushToolConfigSchema, o.discordPush),
   };
+}
+
+/** 安全解析 schedule JSON 数组（坏数据/旧行 → 空数组），逐项过 scheduleItemSchema 补默认值。 */
+function parseSchedule(raw: string | null | undefined): Bot['schedule'] {
+  try {
+    const v = JSON.parse(raw ?? '[]');
+    if (!Array.isArray(v)) return [];
+    const out: Bot['schedule'] = [];
+    for (const item of v) {
+      const r = scheduleItemSchema.safeParse(item);
+      if (r.success) out.push(r.data);
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 const rowToBot = (r: BotRow): Bot => ({
@@ -186,6 +207,8 @@ const rowToBot = (r: BotRow): Bot => ({
   tools: parseBotTools(r.tools),
   allowedRequesters: JSON.parse(r.allowed_requesters),
   projectId: r.project_id ?? null,
+  skills: parseStrArr(r.skills),
+  schedule: parseSchedule(r.schedule),
   enabled: r.enabled === 1,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -215,8 +238,8 @@ export const botRepo = {
     const tools = botToolsSchema.parse(input.tools ?? {});
     getDb()
       .prepare(
-        `INSERT INTO bots (id, name, provider_id, system_prompt, role, temperature, tools, allowed_requesters, project_id, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO bots (id, name, provider_id, system_prompt, role, temperature, tools, allowed_requesters, project_id, skills, schedule, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -228,6 +251,8 @@ export const botRepo = {
         JSON.stringify(tools),
         JSON.stringify(input.allowedRequesters ?? []),
         input.projectId ?? null,
+        JSON.stringify(input.skills ?? []),
+        JSON.stringify(input.schedule ?? []),
         input.enabled ? 1 : 0,
         now,
         now
@@ -258,7 +283,7 @@ export const botRepo = {
     getDb()
       .prepare(
         `UPDATE bots
-           SET name = ?, provider_id = ?, system_prompt = ?, role = ?, temperature = ?, tools = ?, allowed_requesters = ?, project_id = ?, enabled = ?, updated_at = ?
+           SET name = ?, provider_id = ?, system_prompt = ?, role = ?, temperature = ?, tools = ?, allowed_requesters = ?, project_id = ?, skills = ?, schedule = ?, enabled = ?, updated_at = ?
          WHERE id = ?`
       )
       .run(
@@ -270,6 +295,8 @@ export const botRepo = {
         JSON.stringify(tools),
         JSON.stringify(updated.allowedRequesters),
         updated.projectId ?? null,
+        JSON.stringify(updated.skills ?? []),
+        JSON.stringify(updated.schedule ?? []),
         updated.enabled ? 1 : 0,
         updated.updatedAt,
         id

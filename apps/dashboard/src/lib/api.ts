@@ -17,6 +17,10 @@ import type {
   ObservCursor,
   ObservMemoryList,
   LiveOverview,
+  SkillSummary,
+  SkillDetail,
+  BotScheduleEntry,
+  ScheduleRunAck,
 } from '@hivemind/shared';
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:3001';
@@ -83,6 +87,27 @@ export const projectsApi = {
   update: (id: string, patch: ProjectUpdate) =>
     call<ProjectWithMembers>(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   delete: (id: string) => call<{ id: string }>(`/api/projects/${id}`, { method: 'DELETE' }),
+};
+
+// ============================================================
+// Skills + 调度（Phase 3.5）
+// ============================================================
+export const skillsApi = {
+  list: () => call<SkillSummary[]>('/api/skills'),
+  get: (name: string) => call<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`),
+  create: (input: { name: string; content?: string }) =>
+    call<SkillDetail>('/api/skills', { method: 'POST', body: JSON.stringify(input) }),
+  save: (name: string, content: string) =>
+    call<SkillSummary>(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ content }) }),
+  delete: (name: string) => call<{ name: string }>(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+};
+
+export const schedulesApi = {
+  list: () => call<BotScheduleEntry[]>('/api/schedules'),
+  run: (botId: string, index: number) =>
+    call<ScheduleRunAck>(`/api/bots/${botId}/schedules/${index}/run`, { method: 'POST' }),
+  triggerBot: (botId: string, prompt: string) =>
+    call<ScheduleRunAck>(`/api/bots/${botId}/trigger`, { method: 'POST', body: JSON.stringify({ prompt }) }),
 };
 
 // ============================================================

@@ -17,6 +17,7 @@ import { runTestSearch } from './tools/web-search.js';
 import { setSecret, getSecret, deleteSecret, secretAccount } from './secrets.js';
 import { registerObservRoutes } from './api-observ.js';
 import { registerStreamRoute } from './api-stream.js';
+import { registerSkillRoutes } from './api-skills.js';
 import { allowedOrigins } from './cors-origins.js';
 import { exportConfig, importConfig } from './config-io.js';
 
@@ -61,6 +62,8 @@ export function buildApi(): FastifyInstance {
   registerObservRoutes(app);
   // 可观测性实时推送（P5）：SSE /api/stream?botId&sessionId&runId
   registerStreamRoute(app);
+  // Skill 系统 + 调度器（Phase 3.5）：skill CRUD + 调度面板聚合 + 手动触发
+  registerSkillRoutes(app);
 
   // ============================================================
   // 配置导出/导入（机器间迁移）
@@ -178,6 +181,9 @@ export function buildApi(): FastifyInstance {
       patch.tools !== undefined ||
       patch.allowedRequesters !== undefined ||
       patch.name !== undefined ||
+      // Phase 3.5：skills 影响 system prompt + 工具白名单装配；schedule 影响调度器 cron 注册——改了都要重启实例。
+      patch.skills !== undefined ||
+      patch.schedule !== undefined ||
       projectChanged;
 
     if (needsRestart) {

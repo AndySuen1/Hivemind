@@ -98,6 +98,9 @@ importers:
       keytar:
         specifier: ^7.9.0
         version: 7.9.0
+      node-cron:
+        specifier: ^4.2.1
+        version: 4.2.1
       undici:
         specifier: ^6.21.0
         version: 6.24.1
@@ -1336,6 +1339,10 @@ packages:
 
   node-addon-api@4.3.0:
     resolution: {integrity: sha512-73sE9+3UaLYYFmDsFZnqCInzPyh3MqIwZO9cw58yIqAZhONrrabrYyYe3TuIqtIiOuTXVhsGau8hcrhhwSsDIQ==}
+
+  node-cron@4.2.1:
+    resolution: {integrity: sha512-lgimEHPE/QDgFlywTd8yTR61ptugX3Qer29efeyWw2rv259HtGBNn1vZVmp8lB9uo9wC0t/AT4iGqXxia+CJFg==}
+    engines: {node: '>=6.0.0'}
 
   node-releases@2.0.46:
     resolution: {integrity: sha512-GYVXHE2KnrzAfsAjl4uP++evGFCrAU1jta4ubEjIG7YWt/64Gqv66a30yKwWczVjA6j3bM4nBwH7Pk1JmDHaxQ==}
@@ -3081,6 +3088,8 @@ snapshots:
       semver: 7.8.1
 
   node-addon-api@4.3.0: {}
+
+  node-cron@4.2.1: {}
 
   node-releases@2.0.46: {}
 

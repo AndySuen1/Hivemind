@@ -72,6 +72,7 @@ export const EVENT_META: Record<ObservEventType, EventMeta> = {
   permission_decision: { icon: '🔐', label: '权限裁决', color: 'text-warning-fg' },
   ask_question: { icon: '❓', label: '反问', color: 'text-info-fg' },
   mention: { icon: '🤝', label: '跨 bot 转交', color: 'text-info-fg' },
+  schedule_trigger: { icon: '⏰', label: '定时/手动触发', color: 'text-info-fg' },
   error: { icon: '⚠️', label: '错误', color: 'text-danger-fg' },
   rate_limit: { icon: '⏳', label: '限流', color: 'text-warning-fg' },
 };

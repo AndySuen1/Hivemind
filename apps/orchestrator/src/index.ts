@@ -8,6 +8,7 @@ import { initDb, closeDb } from './db.js';
 import { botManager, startConsolidationLoop } from './bot-manager.js';
 import { buildApi } from './api.js';
 import { recoverInterruptedRuns, startRetentionLoop } from './observ-retention.js';
+import { scheduler } from './scheduler.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -50,6 +51,7 @@ async function shutdown(signal: string): Promise<void> {
   stopRetention?.();
   stopConsolidation?.();
   await botManager.stopAll();
+  scheduler.stopAll(); // 兜底清掉所有 cron 定时器（防阻止进程退出）
   closeDb();
   process.exit(0);
 }

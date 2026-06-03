@@ -1,10 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Pencil, Plus, Power, Sparkles, Trash2, Wrench } from 'lucide-react';
-import type { BotCreate, BotUpdate, BotTools, Provider } from '@hivemind/shared';
+import { Pencil, Plus, Power, Puzzle, Sparkles, Trash2, Wrench, X } from 'lucide-react';
+import type { BotCreate, BotUpdate, BotTools, Provider, ScheduleItem, SkillSummary } from '@hivemind/shared';
 import { DEFAULT_DENY_PATTERNS } from '@hivemind/shared';
-import { botsApi, providersApi, projectsApi, type BotWithRuntime, type ProjectWithMembers } from '@/lib/api';
+import { botsApi, providersApi, projectsApi, skillsApi, type BotWithRuntime, type ProjectWithMembers } from '@/lib/api';
 import {
   Badge,
   Button,
@@ -282,6 +282,12 @@ function BotForm(props: BotFormProps) {
   const [convRetrieval, setConvRetrieval] = useState(true);
   // 所属项目（Inter-Agent 协作分组）。'' = 不在任何项目。同项目的 bot 可互相 @。
   const [projectId, setProjectId] = useState('');
+  // 技能 · 调度（Phase 3.5）
+  const [skills, setSkills] = useState<string[]>([]);
+  const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushChannels, setPushChannels] = useState('');
+  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
 
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -290,6 +296,7 @@ function BotForm(props: BotFormProps) {
   const tabs = useTabs([
     { key: 'basic', label: '基本设置' },
     { key: 'tools', label: '工具配置', icon: Wrench },
+    { key: 'skills', label: '技能 · 调度', icon: Puzzle },
     { key: 'advanced', label: '高级 · 委派', icon: Sparkles },
   ]);
 
@@ -319,6 +326,11 @@ function BotForm(props: BotFormProps) {
     setConvSummary(t?.conversationMemory?.summaryEnabled ?? true);
     setConvRetrieval(t?.conversationMemory?.retrievalEnabled ?? true);
     setProjectId(existing?.projectId ?? '');
+    setSkills(existing?.skills ?? []);
+    setSchedule(existing?.schedule ?? []);
+    setPushEnabled(t?.discordPush?.enabled ?? false);
+    setPushChannels((t?.discordPush?.channelIds ?? []).join('\n'));
+    void skillsApi.list().then(setAvailableSkills).catch(() => setAvailableSkills([]));
     setErr(null);
     setSubmitting(false);
     tabs.setValue('basic');
@@ -356,7 +368,11 @@ function BotForm(props: BotFormProps) {
           maxTurns: claudeMaxTurns,
           timeoutMs: Math.max(1, claudeTimeoutMin) * 60000,
         },
+        discordPush: { enabled: pushEnabled, channelIds: linesToArr(pushChannels) },
       };
+
+      // 丢掉 cron/prompt 为空的 schedule 行
+      const cleanSchedule = schedule.filter((r) => r.cron.trim() && r.prompt.trim());
 
       if (isEdit && existing) {
         const patch: BotUpdate = {
@@ -368,6 +384,8 @@ function BotForm(props: BotFormProps) {
           tools,
           allowedRequesters,
           projectId: projectId || null,
+          skills,
+          schedule: cleanSchedule,
           enabled,
         };
         if (discordToken) patch.discordToken = discordToken;
@@ -383,6 +401,8 @@ function BotForm(props: BotFormProps) {
           tools,
           projectId: projectId || null,
           allowedRequesters,
+          skills,
+          schedule: cleanSchedule,
           enabled,
           discordToken,
         };
@@ -642,6 +662,142 @@ function BotForm(props: BotFormProps) {
           </ToolCard>
         </TabPanel>
 
+        {/* —— 技能 · 调度 —— */}
+        <TabPanel tabKey="skills" activeKey={tabs.value} className="space-y-3">
+          {/* 启用 skill */}
+          <ToolCard>
+            <div className="text-sm font-medium text-fg">启用技能（Skill）</div>
+            <div className="mt-1 text-[11px] text-fg-subtle">
+              勾选的 skill 的 SKILL.md 会拼进本 bot 的 system prompt（领域玩法/SOP）。去
+              <a href="/skills" className="underline">技能</a>页新建/编辑。
+            </div>
+            {availableSkills.length === 0 ? (
+              <div className="mt-2 text-[11px] text-fg-subtle">还没有任何 skill —— 先去「技能」页新建一个。</div>
+            ) : (
+              <div className="mt-2 max-h-44 space-y-1 overflow-y-auto rounded border border-border bg-bg p-2">
+                {availableSkills.map((s) => (
+                  <label key={s.name} className="flex items-start gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 accent-primary-strong"
+                      checked={skills.includes(s.name)}
+                      onChange={(e) =>
+                        setSkills((prev) => (e.target.checked ? [...new Set([...prev, s.name])] : prev.filter((x) => x !== s.name)))
+                      }
+                    />
+                    <span className="min-w-0">
+                      <span className="text-fg">{s.name}</span>
+                      {s.description && <span className="ml-1 text-[11px] text-fg-subtle">— {s.description}</span>}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+            {/* 选中但已不存在的 skill（编辑旧配置时）提示 */}
+            {skills.filter((n) => !availableSkills.some((s) => s.name === n)).map((n) => (
+              <div key={n} className="mt-1 text-[10px] text-warning-fg">
+                ⚠️ 已启用「{n}」但该 skill 不存在（已被删除？运行时会被跳过）。
+                <button type="button" className="ml-1 underline" onClick={() => setSkills((p) => p.filter((x) => x !== n))}>
+                  移除
+                </button>
+              </div>
+            ))}
+          </ToolCard>
+
+          {/* discord_push */}
+          <ToolCard>
+            <ToolHeader
+              checked={pushEnabled}
+              onChange={setPushEnabled}
+              title="📤 主动推送 discord_push"
+              desc="允许 bot 主动把消息推到指定频道（不必等用户问）"
+            />
+            {pushEnabled && (
+              <Field label="可推送的频道白名单（每行一个 channel id；留空 = 全部拒绝）" className="mt-2">
+                <Textarea
+                  value={pushChannels}
+                  onChange={(e) => setPushChannels(e.target.value)}
+                  rows={2}
+                  className="font-mono text-xs"
+                  placeholder={'123456789012345678'}
+                />
+              </Field>
+            )}
+          </ToolCard>
+
+          {/* schedule 编辑器 */}
+          <ToolCard>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium text-fg">定时任务（调度器）</div>
+                <div className="mt-1 text-[11px] text-fg-subtle">
+                  到点把 prompt 当一回合注入触发执行。cron 5 段：
+                  <code className="rounded bg-bg-subtle px-1">分 时 日 月 周</code>（如{' '}
+                  <code className="rounded bg-bg-subtle px-1">0 9 * * 1-5</code> = 工作日 9 点）。改了保存会重启本 bot。
+                </div>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                leftIcon={<Plus className="size-3.5" />}
+                onClick={() => setSchedule((s) => [...s, { cron: '', prompt: '', enabled: true }])}
+              >
+                新增一条
+              </Button>
+            </div>
+            {schedule.length === 0 ? (
+              <div className="mt-2 text-[11px] text-fg-subtle">暂无定时任务。</div>
+            ) : (
+              <div className="mt-2 space-y-2">
+                {schedule.map((row, i) => (
+                  <div key={i} className="rounded border border-border bg-bg p-2">
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={row.cron}
+                        onChange={(e) => setSchedule((s) => s.map((r, j) => (j === i ? { ...r, cron: e.target.value } : r)))}
+                        placeholder="0 9 * * 1-5"
+                        className="w-36 font-mono text-xs"
+                      />
+                      <label className="flex items-center gap-1 text-[11px] text-fg-muted">
+                        <input
+                          type="checkbox"
+                          className="accent-primary-strong"
+                          checked={row.enabled}
+                          onChange={(e) => setSchedule((s) => s.map((r, j) => (j === i ? { ...r, enabled: e.target.checked } : r)))}
+                        />
+                        启用
+                      </label>
+                      <button
+                        type="button"
+                        className="ml-auto text-fg-subtle hover:text-danger-fg"
+                        title="删除这条"
+                        onClick={() => setSchedule((s) => s.filter((_, j) => j !== i))}
+                      >
+                        <X className="size-4" />
+                      </button>
+                    </div>
+                    <Input
+                      value={row.prompt}
+                      onChange={(e) => setSchedule((s) => s.map((r, j) => (j === i ? { ...r, prompt: e.target.value } : r)))}
+                      placeholder="到点要 bot 做什么（如：播报一下当前状态）"
+                      className="mt-2 text-xs"
+                    />
+                    <Input
+                      value={row.targetChannelId ?? ''}
+                      onChange={(e) =>
+                        setSchedule((s) => s.map((r, j) => (j === i ? { ...r, targetChannelId: e.target.value || undefined } : r)))
+                      }
+                      placeholder="目标频道 id（可选，填了就把结果直接发该频道；留空则靠 skill 内 discord_push）"
+                      className="mt-2 font-mono text-xs"
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </ToolCard>
+        </TabPanel>
+
         {/* —— 高级 · 委派 —— */}
         <TabPanel tabKey="advanced" activeKey={tabs.value} className="space-y-3">
           <ToolCard>
@@ -742,6 +898,7 @@ function ToolBadges({ tools }: { tools?: BotTools }) {
     active.push(`dirs(${tools.workspaceDirs.length})`);
   if (tools.memory.enabled) active.push('memory');
   if (tools.webSearch.enabled) active.push('web');
+  if (tools.discordPush?.enabled) active.push('push');
   if (active.length === 0) return <div className="text-fg-subtle">工具：无</div>;
   return (
     <div className="flex flex-wrap items-center gap-1">
