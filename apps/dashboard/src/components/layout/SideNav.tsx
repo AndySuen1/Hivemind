@@ -18,7 +18,7 @@ const NAV: { href: string; label: string; icon: LucideIcon }[] = [
 export function SideNav() {
   const pathname = usePathname();
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-bg-subtle px-3 py-5">
+    <aside className="flex w-[260px] shrink-0 flex-col border-r border-border bg-bg-card px-4 py-6">
       {/* 品牌：蜂巢六边形 logo + 名称 */}
       <Link href="/" className="group mb-7 flex items-center gap-2.5 px-2">
         <span className="relative grid size-9 place-items-center">
@@ -32,16 +32,16 @@ export function SideNav() {
           <span className="relative text-sm font-bold text-bg">H</span>
         </span>
         <div className="leading-tight">
-          <div className="text-[15px] font-semibold tracking-tight text-fg">Hivemind</div>
+          <div className="text-base font-semibold tracking-tight text-fg">Hivemind</div>
           <div className="text-[11px] text-fg-subtle">控制台</div>
         </div>
       </Link>
 
       {/* 分组标签 */}
-      <div className="mb-1.5 px-3 text-[11px] font-medium uppercase tracking-wider text-fg-subtle">管理</div>
+      <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-wider text-fg-subtle">管理</div>
 
       {/* 导航 */}
-      <nav className="space-y-0.5">
+      <nav className="space-y-1">
         {NAV.map(({ href, label, icon: Icon }) => {
           const active = href === '/' ? pathname === '/' : pathname.startsWith(href);
           return (
@@ -50,14 +50,14 @@ export function SideNav() {
               href={href}
               aria-current={active ? 'page' : undefined}
               className={cn(
-                'group flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors duration-fast',
+                'group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[15px] transition-colors duration-fast',
                 active
                   ? 'bg-primary-soft font-medium text-primary'
                   : 'text-fg-muted hover:bg-bg-hover hover:text-fg',
               )}
             >
               <Icon
-                className={cn('size-[18px] transition-colors', active ? 'text-primary' : 'text-fg-subtle group-hover:text-fg')}
+                className={cn('size-5 transition-colors', active ? 'text-primary' : 'text-fg-subtle group-hover:text-fg')}
                 strokeWidth={active ? 2 : 1.75}
               />
               {label}

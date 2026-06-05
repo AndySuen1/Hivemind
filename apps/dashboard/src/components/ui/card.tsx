@@ -23,8 +23,8 @@ export const Card = forwardRef<HTMLDivElement, CardProps>(function Card(
     <div
       ref={ref}
       className={cn(
-        'rounded-lg border border-border bg-bg-card',
-        interactive && 'cursor-pointer transition-colors duration-fast hover:border-border-strong',
+        'rounded-2xl border border-border bg-bg-card shadow-xs',
+        interactive && 'cursor-pointer transition duration-fast hover:-translate-y-0.5 hover:border-border-strong hover:shadow-md',
         PAD[padding],
         className,
       )}

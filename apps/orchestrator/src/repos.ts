@@ -119,6 +119,7 @@ type BotRow = {
   project_id: string | null;
   skills: string;
   schedule: string;
+  avatar: string;
   enabled: number;
   created_at: number;
   updated_at: number;
@@ -209,6 +210,7 @@ const rowToBot = (r: BotRow): Bot => ({
   projectId: r.project_id ?? null,
   skills: parseStrArr(r.skills),
   schedule: parseSchedule(r.schedule),
+  avatar: r.avatar ?? '',
   enabled: r.enabled === 1,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
@@ -238,8 +240,8 @@ export const botRepo = {
     const tools = botToolsSchema.parse(input.tools ?? {});
     getDb()
       .prepare(
-        `INSERT INTO bots (id, name, provider_id, system_prompt, role, temperature, tools, allowed_requesters, project_id, skills, schedule, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO bots (id, name, provider_id, system_prompt, role, temperature, tools, allowed_requesters, project_id, skills, schedule, avatar, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -253,6 +255,7 @@ export const botRepo = {
         input.projectId ?? null,
         JSON.stringify(input.skills ?? []),
         JSON.stringify(input.schedule ?? []),
+        input.avatar ?? '',
         input.enabled ? 1 : 0,
         now,
         now
@@ -274,16 +277,21 @@ export const botRepo = {
           fs: { ...existing.tools.fs, ...(pt.fs ?? {}) },
           bash: { ...existing.tools.bash, ...(pt.bash ?? {}) },
           memory: { ...existing.tools.memory, ...(pt.memory ?? {}) },
-          conversationMemory: { ...existing.tools.conversationMemory, ...(pt.conversationMemory ?? {}) },
+          // windowTurns 是前端唯一会「省略键=清除」的字段（convWindow=0 时 buildTools 不发该键）：
+          // 只要本次带了 conversationMemory，就以它的 windowTurns 为准（缺=回退全局默认），不被浅合并保留旧值。
+          conversationMemory: pt.conversationMemory
+            ? { ...existing.tools.conversationMemory, ...pt.conversationMemory, windowTurns: pt.conversationMemory.windowTurns }
+            : existing.tools.conversationMemory,
           webSearch: { ...existing.tools.webSearch, ...(pt.webSearch ?? {}) },
           claudeCode: { ...existing.tools.claudeCode, ...(pt.claudeCode ?? {}) },
+          discordPush: { ...existing.tools.discordPush, ...(pt.discordPush ?? {}) },
         }
       : existing.tools;
     const tools = botToolsSchema.parse(mergedTools);
     getDb()
       .prepare(
         `UPDATE bots
-           SET name = ?, provider_id = ?, system_prompt = ?, role = ?, temperature = ?, tools = ?, allowed_requesters = ?, project_id = ?, skills = ?, schedule = ?, enabled = ?, updated_at = ?
+           SET name = ?, provider_id = ?, system_prompt = ?, role = ?, temperature = ?, tools = ?, allowed_requesters = ?, project_id = ?, skills = ?, schedule = ?, avatar = ?, enabled = ?, updated_at = ?
          WHERE id = ?`
       )
       .run(
@@ -297,6 +305,7 @@ export const botRepo = {
         updated.projectId ?? null,
         JSON.stringify(updated.skills ?? []),
         JSON.stringify(updated.schedule ?? []),
+        updated.avatar ?? '',
         updated.enabled ? 1 : 0,
         updated.updatedAt,
         id

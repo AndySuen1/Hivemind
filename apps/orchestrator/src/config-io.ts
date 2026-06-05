@@ -160,13 +160,14 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
   const projectExists = db.prepare('SELECT 1 FROM projects WHERE id = ?');
 
   const upsertBot = db.prepare(`
-    INSERT INTO bots (id, name, provider_id, system_prompt, role, temperature, tools, allowed_requesters, project_id, skills, schedule, enabled, created_at, updated_at)
-    VALUES (@id, @name, @provider_id, @system_prompt, @role, @temperature, @tools, @allowed_requesters, @project_id, @skills, @schedule, @enabled, @created_at, @updated_at)
+    INSERT INTO bots (id, name, provider_id, system_prompt, role, temperature, tools, allowed_requesters, project_id, skills, schedule, avatar, enabled, created_at, updated_at)
+    VALUES (@id, @name, @provider_id, @system_prompt, @role, @temperature, @tools, @allowed_requesters, @project_id, @skills, @schedule, @avatar, @enabled, @created_at, @updated_at)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name, provider_id = excluded.provider_id, system_prompt = excluded.system_prompt,
       role = excluded.role, temperature = excluded.temperature, tools = excluded.tools,
       allowed_requesters = excluded.allowed_requesters,
       project_id = excluded.project_id, skills = excluded.skills, schedule = excluded.schedule,
+      avatar = excluded.avatar,
       enabled = excluded.enabled, updated_at = excluded.updated_at
   `);
   for (const b of data.bots as BotExport[]) {
@@ -187,6 +188,7 @@ export async function importConfig(raw: unknown): Promise<ImportResult> {
         project_id: projectId,
         skills: JSON.stringify(Array.isArray(b.skills) ? b.skills : []),
         schedule: JSON.stringify(Array.isArray(b.schedule) ? b.schedule : []),
+        avatar: typeof b.avatar === 'string' ? b.avatar : '',
         enabled: b.enabled ? 1 : 0,
         created_at: b.createdAt ?? now,
         updated_at: now,

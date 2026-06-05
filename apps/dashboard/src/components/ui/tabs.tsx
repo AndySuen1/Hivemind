@@ -15,22 +15,28 @@ export interface TabsProps {
   value: string;
   onChange: (key: string) => void;
   className?: string;
+  /** 横排（默认，下边框指示）或竖排（左侧软色 pill，对齐 SideNav）。 */
+  orientation?: 'horizontal' | 'vertical';
 }
 
 /**
  * 标签栏：受控（value/onChange）。roving tabindex + 方向键/Home/End 切换，
- * CSS-first（仅 border-color 过渡）。视觉沿用 bot 详情页原手写值，零回归。
+ * CSS-first（仅 border-color 过渡）。横排视觉沿用 bot 详情页原手写值，零回归；
+ * 竖排借鉴 SideNav 的 active pill（bg-primary-soft），不用发丝描边线框。
  */
-export function Tabs({ items, value, onChange, className }: TabsProps) {
+export function Tabs({ items, value, onChange, className, orientation = 'horizontal' }: TabsProps) {
   const baseId = useId();
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const vertical = orientation === 'vertical';
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     const idx = items.findIndex((t) => t.key === value);
     if (idx < 0) return;
+    const nextKey = vertical ? 'ArrowDown' : 'ArrowRight';
+    const prevKey = vertical ? 'ArrowUp' : 'ArrowLeft';
     let next = idx;
-    if (e.key === 'ArrowRight') next = (idx + 1) % items.length;
-    else if (e.key === 'ArrowLeft') next = (idx - 1 + items.length) % items.length;
+    if (e.key === nextKey) next = (idx + 1) % items.length;
+    else if (e.key === prevKey) next = (idx - 1 + items.length) % items.length;
     else if (e.key === 'Home') next = 0;
     else if (e.key === 'End') next = items.length - 1;
     else return;
@@ -40,7 +46,12 @@ export function Tabs({ items, value, onChange, className }: TabsProps) {
   };
 
   return (
-    <div role="tablist" className={cn('flex gap-1 border-b border-border', className)} onKeyDown={onKeyDown}>
+    <div
+      role="tablist"
+      aria-orientation={orientation}
+      className={cn(vertical ? 'flex flex-col gap-1' : 'flex gap-1 border-b border-border', className)}
+      onKeyDown={onKeyDown}
+    >
       {items.map((t, i) => {
         const active = t.key === value;
         const Icon = t.icon;
@@ -58,10 +69,17 @@ export function Tabs({ items, value, onChange, className }: TabsProps) {
             tabIndex={active ? 0 : -1}
             onClick={() => onChange(t.key)}
             className={cn(
-              '-mb-px flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
-              active
-                ? 'border-primary-strong font-medium text-primary-strong'
-                : 'border-transparent text-fg-muted hover:text-fg',
+              'flex items-center text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+              vertical
+                ? 'w-full gap-2.5 rounded-lg px-3 py-2'
+                : '-mb-px gap-1.5 border-b-2 px-4 py-2',
+              vertical
+                ? active
+                  ? 'bg-primary-soft font-medium text-primary'
+                  : 'text-fg-muted hover:bg-bg-hover hover:text-fg'
+                : active
+                  ? 'border-primary-strong font-medium text-primary-strong'
+                  : 'border-transparent text-fg-muted hover:text-fg',
             )}
           >
             {Icon && <Icon className="size-4" strokeWidth={1.75} />}

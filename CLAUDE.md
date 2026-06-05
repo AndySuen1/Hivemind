@@ -41,7 +41,7 @@ apps/orchestrator/node_modules/.bin/tsc -p apps/orchestrator/tsconfig.json --noE
 apps/orchestrator/node_modules/.bin/tsx apps/orchestrator/pA-smoke.ts
 ```
 
-各脚本对应的功能：`p2`=可观测性埋点链路 · `p3`=委派/权限消息解析 · `p4`=查询 API · `p5`=SSE 实时推送 · `p7`=数据保留清理 · `pA`=L1 对话复原 · `pB`=L2 滚动摘要 · `pC`=L4 FTS5 检索 · `pD`=L3 触发式整理 · `pE`=字符预算裁剪 · `pG`=Inter-Agent Router（任务预算/短循环/熔断/relay 注册消费，纯逻辑无 Discord）· `pH`=Project repo（项目 CRUD + 单 bot 单项目成员语义 + 删项目置空成员）· `pJ`=Skill 加载器（listSkills/frontmatter/路径穿越/composeSkillsPrompt）· `pK`=调度器（register 合法性/幂等/unregister/invoke 防重入）· `pL`=discord_push 白名单（命中/非白名单/缺上下文/fail-closed/发送失败）。改了相关模块就跑对应脚本验证。
+各脚本对应的功能：`p2`=可观测性埋点链路 · `p3`=委派/权限消息解析 · `p4`=查询 API · `p5`=SSE 实时推送 · `p7`=数据保留清理 · `pA`=L1 对话复原 · `pB`=L2 滚动摘要 · `pC`=L4 FTS5 检索 · `pD`=L3 触发式整理 · `pE`=字符预算裁剪 · `pG`=Inter-Agent Router（任务预算/短循环/熔断/relay 注册消费，纯逻辑无 Discord）· `pH`=Project repo（项目 CRUD + 单 bot 单项目成员语义 + 删项目置空成员）· `pJ`=Skill 加载器（listSkills/frontmatter/路径穿越/composeSkillsPrompt）· `pK`=调度器（register 合法性/幂等/unregister/invoke 防重入）· `pL`=discord_push 白名单（命中/非白名单/缺上下文/fail-closed/发送失败）· `pM`=日志系统（patch stdout/stderr 采集/level 推断/脱敏/批量落盘/游标分页/ingest 去重/onLog 订阅/retention/SSE 流/HTTP 路由）。改了相关模块就跑对应脚本验证。
 
 ## 仓库结构
 
@@ -93,6 +93,13 @@ packages/shared     @hivemind/shared        跨包 Zod schema + TS 类型（唯�
 - `src/recorder.ts` 是**唯一写入口**：脱敏 → 截断 8KB → 事务写库 → EventEmitter 广播。所有埋点都经它，绝不直接碰 SQL，且整体 try/catch 永不阻断主流程。
 - 数据流：`recorder` 落库 → 查询 API（`api-observ.ts`，游标分页）+ SSE 实时（`api-stream.ts`）→ dashboard。保留清理在 `observ-retention.ts`（启动恢复孤儿 running 回合 + 周期清理）。
 - 面向前端的 camelCase 类型在 `packages/shared`；DB 行是 snake_case（migration 0005），repo 层映射。
+
+### 可视化日志系统（与可观测性正交：采「原始运行日志」而非结构化业务事件）
+- **背景**：全项目 80+ 处 `console.*` 只写 stdout/stderr；托盘开机自启用 wscript+VBS 隐藏了控制台窗口 → 这些日志原本无处可看。本系统把它们采集、落库、在 dashboard「监控」页「日志」tab 实时可视化。
+- **采集核心** `src/log-collector.ts`（单例 `logCollector`，仿 recorder）：**patch `process.stdout/stderr.write`**（字节流层拦一次即覆盖所有 console.* / pino / 第三方库 / delegation 对 claude 子进程的直写），**不 patch console.\***（避免双记）。`record()` 入口脱敏（复用 `redactText`）+ 截断 → push 环形缓冲（事实源，最近 2000）→ `bus.emit` 广播 → 入 pending；**DB 是异步批量旁路**（`db.transaction()` 满 200 或 250ms 节流，失败丢这批不重试）——绝不在 Discord 热路径上同步 INSERT。**铁律：本模块任何代码禁用 console.\***（否则被自己的 patch 捕获 → 递归放大）；内部错误只写 `_lastError`，经 `/api/health` 的 `logCollector.stats()` 自检。
+- `install()` 在 `index.ts` 的 dotenv 后、`initDb` 前调（抓最早 boot 日志）；`initStore(db)` 在 initDb 后 flush 早期 pending。`parseLine` 统一推断 level（pino JSON 抽 level / 关键词含中文「异常/失败/错误」）+ 解析 `[tag]` 前缀。
+- **跨进程**（migration 0012 `logs` 表，无 CASCADE；清理并入 `observ-retention.ts` 的 sweep，env `LOG_RETENTION_DAYS` 默认 7）：launcher（CommonJS，**不能加载原生模块** → 不能直接写 SQLite）经 `apps/launcher/src/log-forwarder.ts` 把**它自身 + spawn 的 dashboard/orchestrator 子进程**的 stdout/stderr 用 `node:http` 批量 POST 到 orchestrator `POST /api/logs/ingest`（鉴权 `LOG_INGEST_TOKEN`，由 launcher 随机生成经 env **只**注入 orchestrator 子进程，绝不进 NEXT_PUBLIC）。转发 orchestrator 子进程是为了补齐其 **install 之前 / 崩溃那一刻**（EADDRINUSE/`[fatal]`）的日志——正常期与自捕获重复由 ingest 端按 `source+message+ts` 近窗口**去重**。
+- 数据流：`logCollector` → 查询 `GET /api/logs`（游标分页 + level/source/q 过滤）+ SSE `GET /api/logs/stream`（`src/sse.ts` 共享骨架，与 `api-stream.ts` 同源）→ dashboard `components/observ/LogsView.tsx`（`use-log-stream.ts` + 去重合并 + 粘底 + 加载更早 + 100ms 批量 setText 防洪峰）。冒烟 `pM`。
 
 ### 数据与密钥存储（三处，分工明确）
 - **密钥**（provider API key / Discord token / web-search key）→ keytar 系统凭证库。service 名 `discord-agent-hub`（历史值，**勿改**，改了现有密钥全失联，见 `secrets.ts`）。

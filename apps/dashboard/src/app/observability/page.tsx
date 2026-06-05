@@ -2,14 +2,38 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, Activity, ScrollText } from 'lucide-react';
 import type { LiveOverview } from '@hivemind/shared';
 import { observApi } from '@/lib/api';
 import { fmtAgo } from '@/lib/observ-ui';
-import { Button, EmptyState, PageContainer, PageHeader, Skeleton, StatusPill, useConfirm } from '@/components/ui';
+import { Button, EmptyState, PageContainer, PageHeader, Skeleton, StatusPill, Tabs, useConfirm, useTabs } from '@/components/ui';
 import { listEq } from '@/lib/shallow-eq';
+import { LogsView } from '@/components/observ/LogsView';
+
+const TABS = [
+  { key: 'overview', label: '概览', icon: Activity },
+  { key: 'logs', label: '日志', icon: ScrollText },
+];
 
 export default function ObservabilityPage() {
+  const { value, tabProps } = useTabs(TABS, { defaultKey: 'overview', queryKey: 'tab' });
+
+  return (
+    <PageContainer size="wide">
+      <PageHeader
+        title="监控"
+        subtitle="各 bot 运行状态与活动量 · 原始运行日志实时流"
+      />
+      <Tabs {...tabProps} className="mb-4" />
+      {value === 'overview' ? <OverviewTab /> : <LogsView />}
+    </PageContainer>
+  );
+}
+
+// ============================================================
+// 概览 tab：各 bot 运行状态与活动量网格（每 3 秒轮询 + listEq 短路）
+// ============================================================
+function OverviewTab() {
   const [data, setData] = useState<LiveOverview | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [now, setNow] = useState(0);
@@ -78,21 +102,15 @@ export default function ObservabilityPage() {
   };
 
   return (
-    <PageContainer size="wide">
-      <PageHeader
-        title="监控"
-        subtitle="各 bot 运行状态与活动量 · 点卡片进入详情（聊天 / 执行追踪 / 记忆）· 每 3 秒刷新"
-        actions={
-          <>
-            {purgeMsg && <span className="text-xs text-fg-muted">{purgeMsg}</span>}
-            <Button size="sm" onClick={runRetention} loading={purging} title="按 OBSERV_RETENTION_DAYS 删除过期会话">
-              {purging ? '清理中…' : '清理过期数据'}
-            </Button>
-          </>
-        }
-      />
+    <div className="space-y-3">
+      <div className="flex items-center justify-end gap-3">
+        {purgeMsg && <span className="text-xs text-fg-muted">{purgeMsg}</span>}
+        <Button size="sm" onClick={runRetention} loading={purging} title="按 OBSERV_RETENTION_DAYS 删除过期会话">
+          {purging ? '清理中…' : '清理过期数据'}
+        </Button>
+      </div>
 
-      {err && <div className="mb-4 rounded bg-danger-soft p-3 text-sm text-danger-fg">{err}（orchestrator 在跑吗？:3001）</div>}
+      {err && <div className="rounded bg-danger-soft p-3 text-sm text-danger-fg">{err}（orchestrator 在跑吗？:3001）</div>}
 
       {!data ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -145,7 +163,7 @@ export default function ObservabilityPage() {
           ))}
         </div>
       )}
-    </PageContainer>
+    </div>
   );
 }
 

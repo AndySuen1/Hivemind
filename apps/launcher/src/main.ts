@@ -3,6 +3,7 @@
 import { app, shell, Tray } from 'electron';
 import { getConfig, getConfigPath, loadConfig, updateConfig } from './config';
 import { ProcessManager } from './process-manager';
+import { LogForwarder } from './log-forwarder';
 import { ensureAutoLaunchHidden, getAutoLaunch, setAutoLaunch } from './login-item';
 import { startControlServer } from './control-server';
 import { createTray } from './tray';
@@ -29,11 +30,20 @@ if (!app.requestSingleInstanceLock()) {
 
 function init(): void {
   const cfg = loadConfig();
+
+  // 日志转发：尽早 install（patch launcher stdout/stderr，从此 launcher 自身日志也汇入可视化日志系统）。
+  // endpoint 用闭包惰性读 getConfig() → 端口改动重启后自动指向新 orchestrator，无需额外重连。
+  const forwarder = new LogForwarder(() => {
+    const c = getConfig();
+    return { host: c.host, port: c.apiPort, token: c.ingestToken };
+  });
+  forwarder.install();
+
   console.log(`[main] 配置文件: ${getConfigPath()}`);
   if (process.platform === 'darwin') app.dock?.hide(); // 纯托盘应用，不在程序坞显示
   ensureAutoLaunchHidden(); // 旧版自启会弹黑窗，启动时就地迁移为 wscript 隐藏形式
 
-  const pm = new ProcessManager();
+  const pm = new ProcessManager(forwarder);
   const listeners: Array<() => void> = [];
   const notify = (): void => listeners.forEach((fn) => fn());
   pm.on('status-change', notify);

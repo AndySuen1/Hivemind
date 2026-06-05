@@ -22,6 +22,8 @@ function intEnv(name: string, def: number): number {
 
 /** 保留天数：last_active_at 早于「now - 天数」的会话会被清理。0 = 关闭自动清理（仍可手动）。默认 30 天。 */
 export const RETENTION_DAYS = intEnv('OBSERV_RETENTION_DAYS', 30);
+/** 日志（logs 表）保留天数：早于「now - 天数」的日志行会被清理。比会话短（日志量大、价值衰减快）。0 = 关闭。默认 7 天。 */
+export const LOG_RETENTION_DAYS = intEnv('LOG_RETENTION_DAYS', 7);
 /** 后台清理间隔（小时）。<=0 视为默认。默认 6 小时。 */
 export const RETENTION_INTERVAL_HOURS = (() => {
   const h = intEnv('OBSERV_RETENTION_INTERVAL_HOURS', 6);
@@ -89,6 +91,23 @@ export function purgeByRetention(days: number = RETENTION_DAYS): { sessions: num
   }
 }
 
+/**
+ * 清理 logs 表里早于「now - LOG_RETENTION_DAYS 天」的日志行（无 CASCADE，直接按 ts 删）。
+ * 后台 sweep 调用；整体 try/catch 不外抛（定时器路径不能因 DB 故障崩）。LOG_RETENTION_DAYS=0 关闭。返回被删行数。
+ */
+export function purgeLogsByRetention(days: number = LOG_RETENTION_DAYS): { logs: number } {
+  const d = Math.floor(days);
+  if (!d || d <= 0) return { logs: 0 };
+  try {
+    const cutoff = Date.now() - d * DAY_MS;
+    const res = getDb().prepare('DELETE FROM logs WHERE ts < ?').run(cutoff);
+    return { logs: res.changes };
+  } catch (e) {
+    console.error('[retention] purgeLogsByRetention 失败（已忽略）:', e);
+    return { logs: 0 };
+  }
+}
+
 /** 删除单个会话（CASCADE 连带清其回合/消息/事件）。返回是否删到（false=不存在）。 */
 export function deleteSession(sessionId: string): boolean {
   if (!sessionId) return false;
@@ -108,13 +127,15 @@ export function deleteBotHistory(botId: string): { sessions: number } {
  * 返回停止函数（供 shutdown 调用清掉定时器）。RETENTION_DAYS=0 时不启动定时器（仍可手动清理）。
  */
 export function startRetentionLoop(): () => void {
-  if (RETENTION_DAYS <= 0) {
-    console.log('[retention] OBSERV_RETENTION_DAYS=0，自动清理已关闭（仍可手动清理）');
+  if (RETENTION_DAYS <= 0 && LOG_RETENTION_DAYS <= 0) {
+    console.log('[retention] 会话与日志自动清理均已关闭（仍可手动清理）');
     return () => {};
   }
   const sweep = (): void => {
     const { sessions } = purgeByRetention();
     if (sessions > 0) console.log(`[retention] 清理 ${sessions} 个过期会话（保留 ${RETENTION_DAYS} 天）`);
+    const { logs } = purgeLogsByRetention();
+    if (logs > 0) console.log(`[retention] 清理 ${logs} 条过期日志（保留 ${LOG_RETENTION_DAYS} 天）`);
   };
   sweep();
   // setInterval 延迟是 32 位有符号整数（上限 2^31-1 ms ≈ 24.8 天 ≈ 596h），超限会被 Node 静默退化为 1ms

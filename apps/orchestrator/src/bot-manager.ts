@@ -109,6 +109,8 @@ class BotInstance {
   private consolidating = false;
   // 在跑的消息处理的 AbortController 集合：bot 停机时全部 abort，中止在跑的 Claude 委派
   private active = new Set<AbortController>();
+  // 已停机标记：stop() 置 true，用于在 start() 的登录重试退避期间被停机时立刻放弃（避免停机后还在重连）。
+  private stopped = false;
   public status: BotRuntimeInfo['status'] = 'offline';
   public errorMessage?: string;
   public connectedAt?: number;
@@ -184,7 +186,7 @@ class BotInstance {
       this.consolidateActive =
         CONSOLIDATE_ENABLED && this.bot.tools.memory.enabled && this.summaryActive && !!this.toolRuntime.memoryDir;
 
-      await this.client.login(token);
+      await this.loginWithRetry(token);
 
       // Phase 3.5：注册本 bot 的定时任务（按构造时快照的 bot.schedule）。改 schedule 要重启实例（restart=stop+start
       // 自动「注销旧 + 注册新」）。非法 cron / disabled 项由 scheduler 跳过。
@@ -197,7 +199,48 @@ class BotInstance {
     }
   }
 
+  /**
+   * 冷启动网络竞速容错：开机自启时 orchestrator 往往在网络/DNS/TLS 通道就绪前就拉起，
+   * 首次 client.login 会因 TLS 握手被掐断而失败（discord.js 自带的自动重连只在「首连成功后」掉线才生效，
+   * 救不了首连失败）。这里对**网络类瞬时错误**带退避重试；**鉴权错误（token 无效 / intents 不被允许）不重试**
+   * （重试也不会好，还可能触发 Discord 限流）。重试期间 status 保持 'connecting'，被停机则立刻放弃。
+   */
+  private async loginWithRetry(token: string): Promise<void> {
+    const backoffMs = [2000, 4000, 8000, 16000, 30000]; // 最多 6 次尝试（首次 + 5 次重试），约覆盖开机后 60s 网络预热
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.client.login(token);
+        return;
+      } catch (e) {
+        if (this.stopped) throw e; // 重试期间被停机：放弃
+        if (attempt >= backoffMs.length || !this.isTransientNetworkError(e)) throw e;
+        const wait = backoffMs[attempt];
+        console.warn(
+          `[bot:${this.bot.name}] 登录失败（第 ${attempt + 1} 次，${wait}ms 后重试）：${(e as Error).message}`,
+        );
+        await new Promise((r) => setTimeout(r, wait));
+        if (this.stopped) throw new Error('启动期间已停机，放弃登录重试');
+      }
+    }
+  }
+
+  /** 判断是否为「网络/DNS/TLS 瞬时错误」（值得重试）。鉴权类错误明确排除——重试无意义且会被限流。 */
+  private isTransientNetworkError(e: unknown): boolean {
+    const err = e as { code?: unknown; message?: unknown };
+    const code = typeof err?.code === 'string' ? err.code : '';
+    const msg = typeof err?.message === 'string' ? err.message : String(e ?? '');
+    // 鉴权/配置类失败：不重试
+    if (/invalid token|token.*invalid|disallowed intents|privileged intent/i.test(msg)) return false;
+    return (
+      /ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE|UND_ERR/i.test(code) ||
+      /socket disconnected|secure TLS|network socket|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|getaddrinfo|EAI_AGAIN|network|timed out|timeout|fetch failed|terminated/i.test(
+        msg,
+      )
+    );
+  }
+
   async stop(): Promise<void> {
+    this.stopped = true;
     // 先注销定时任务（防停机后 cron 还触发已断开的实例），再中止在跑回合、断开 client。
     scheduler.unregister(this.bot.id);
     // 先中止所有在跑的委派（杀 Claude 子进程 + 取消待处理的 Discord 交互），再断开 client

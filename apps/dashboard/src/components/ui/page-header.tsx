@@ -15,7 +15,7 @@ export function PageHeader({ title, subtitle, actions, breadcrumb, className }: 
       {breadcrumb && <nav className="mb-1.5 text-xs text-fg-subtle">{breadcrumb}</nav>}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-fg">{title}</h1>
+          <h1 className="text-3xl font-bold tracking-tight text-fg">{title}</h1>
           {subtitle && <p className="mt-1 text-sm text-fg-muted">{subtitle}</p>}
         </div>
         {actions && <div className="flex items-center gap-2">{actions}</div>}

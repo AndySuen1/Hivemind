@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 import { app } from 'electron';
 import { getConfig } from './config';
 import { resolveNodePath } from './node-path';
+import type { LogForwarder } from './log-forwarder';
 import type { ServiceName, ServiceState } from './types';
 
 const RESTART_BACKOFF_MS = 2000;
@@ -42,6 +43,11 @@ export class ProcessManager extends EventEmitter {
   };
   lastError: string | undefined;
 
+  // forwarder 把子进程 stdout/stderr 转发到 orchestrator /api/logs/ingest（可选；无则退回直接透传终端）。
+  constructor(private readonly forwarder?: LogForwarder) {
+    super();
+  }
+
   private blank(name: ServiceName): Service {
     return { name, child: null, state: 'stopped', manualStop: false, crashes: 0, readyTimer: null, forceTimer: null, exitWaiters: [] };
   }
@@ -72,6 +78,8 @@ export class ProcessManager extends EventEmitter {
           API_PORT: String(cfg.apiPort),
           DASHBOARD_PORT: String(cfg.dashboardPort),
           DASHBOARD_ORIGIN: `http://${cfg.host}:${cfg.dashboardPort}`,
+          // 日志转发鉴权：**只**注入 orchestrator（dashboard 不给，绝不进 NEXT_PUBLIC 暴露给浏览器）。
+          LOG_INGEST_TOKEN: cfg.ingestToken,
         },
       };
     }
@@ -111,11 +119,26 @@ export class ProcessManager extends EventEmitter {
     svc.child = child;
     this.setState(svc, 'starting');
 
-    child.stdout?.on('data', (d) => process.stdout.write(`[${name}] ${d}`));
+    // 子进程输出：透传终端（dev 可见）+ 转发采集为对应 source。透传走 forwarder.writeOut/Err（绕过
+    // launcher 自捕获，避免与 push 重复）；无 forwarder 时退回直接写终端。
+    child.stdout?.on('data', (d) => {
+      const s = String(d);
+      if (this.forwarder) {
+        this.forwarder.writeOut(`[${name}] ${s}`);
+        this.forwarder.push(name, 'out', s);
+      } else {
+        process.stdout.write(`[${name}] ${s}`);
+      }
+    });
     child.stderr?.on('data', (d) => {
       const s = String(d);
       if (/EADDRINUSE/.test(s)) this.lastError = `${name} 端口被占用`;
-      process.stderr.write(`[${name}] ${s}`);
+      if (this.forwarder) {
+        this.forwarder.writeErr(`[${name}] ${s}`);
+        this.forwarder.push(name, 'err', s);
+      } else {
+        process.stderr.write(`[${name}] ${s}`);
+      }
     });
 
     child.on('error', (err) => {

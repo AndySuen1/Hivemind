@@ -112,14 +112,20 @@ check('默认 role 为空串', botRepo.get('b2')?.role === '');
 await botRepo.update('b2', { role: '后端工程师' });
 check('role 落库 + 读回', botRepo.get('b2')?.role === '后端工程师');
 
-console.log('— config-io 往返保留项目/bot.projectId + workspaceDirs + role（不含密钥，避开 keytar）—');
-await botRepo.update('b1', { role: '项目经理' });
+console.log('— bot 头像 avatar 往返 —');
+check('默认 avatar 为空串', botRepo.get('b2')?.avatar === '');
+await botRepo.update('b2', { avatar: 'data:image/png;base64,AAAA' });
+check('avatar 落库 + 读回', botRepo.get('b2')?.avatar === 'data:image/png;base64,AAAA');
+
+console.log('— config-io 往返保留项目/bot.projectId + workspaceDirs + role + avatar（不含密钥，避开 keytar）—');
+await botRepo.update('b1', { role: '项目经理', avatar: 'data:image/webp;base64,BBBB' });
 const pX = projectRepo.create({ name: '导出组', memberBotIds: ['b1'], maxTurnsPerTask: 9, maxCostUsd: 0, workspaceDirs: ['/exp/dir'] });
 const bundle = await exportConfig(false);
 check('导出 bundle 含 projects', Array.isArray(bundle.projects) && bundle.projects!.some((p) => p.id === pX.id));
 check('导出 project 带 workspaceDirs', bundle.projects!.find((p) => p.id === pX.id)?.workspaceDirs.join() === '/exp/dir');
 check('导出的 bot 带 projectId', bundle.bots.find((b) => b.id === 'b1')?.projectId === pX.id);
 check('导出的 bot 带 role', bundle.bots.find((b) => b.id === 'b1')?.role === '项目经理');
+check('导出的 bot 带 avatar', bundle.bots.find((b) => b.id === 'b1')?.avatar === 'data:image/webp;base64,BBBB');
 projectRepo.delete(pX.id); // 模拟新机器：项目没了，b1.project_id 置 NULL
 check('清理后 b1 无项目', pidOf('b1') === null);
 const res = await importConfig(bundle);
@@ -128,6 +134,7 @@ check('导入后项目预算恢复（maxTurns=9）', projectRepo.get(pX.id)?.max
 check('导入后项目 workspaceDirs 恢复', projectRepo.get(pX.id)?.workspaceDirs.join() === '/exp/dir');
 check('导入后 b1.projectId 恢复', pidOf('b1') === pX.id);
 check('导入后 b1.role 恢复', botRepo.get('b1')?.role === '项目经理');
+check('导入后 b1.avatar 恢复', botRepo.get('b1')?.avatar === 'data:image/webp;base64,BBBB');
 // 悬挂防护：projectId 指向不存在项目 → 导入置 NULL
 const dangling = { ...bundle, projects: [], bots: bundle.bots.map((b) => ({ ...b })) };
 projectRepo.delete(pX.id);

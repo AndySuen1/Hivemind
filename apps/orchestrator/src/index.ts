@@ -4,10 +4,11 @@ delete process.env.ANTHROPIC_API_KEY;
 import 'dotenv/config';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { initDb, closeDb } from './db.js';
+import { initDb, closeDb, getDb } from './db.js';
 import { botManager, startConsolidationLoop } from './bot-manager.js';
 import { buildApi } from './api.js';
 import { recoverInterruptedRuns, startRetentionLoop } from './observ-retention.js';
+import { logCollector } from './log-collector.js';
 import { scheduler } from './scheduler.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -20,8 +21,14 @@ let stopRetention: (() => void) | null = null;
 let stopConsolidation: (() => void) | null = null;
 
 async function main(): Promise<void> {
+  // 日志采集尽早安装：patch process.stdout/stderr → 从此每行进环形缓冲（此刻 DB 未就绪，
+  // 早期 boot 日志暂存 pending，待 initStore 后批量落盘）。install 前的日志由 launcher 转发补齐。
+  logCollector.install();
+
   console.log(`[boot] DB: ${DB_PATH}`);
   initDb(DB_PATH);
+  // DB 就绪：建预编译语句 + flush install→initDb 窗口积累的早期日志。
+  logCollector.initStore(getDb());
 
   // 此刻 DB 里任何 status='running' 必来自上个进程（崩溃/热重载），先恢复为 aborted 再开始处理新消息。
   const recovered = recoverInterruptedRuns();
@@ -52,6 +59,7 @@ async function shutdown(signal: string): Promise<void> {
   stopConsolidation?.();
   await botManager.stopAll();
   scheduler.stopAll(); // 兜底清掉所有 cron 定时器（防阻止进程退出）
+  logCollector.flush(); // 落盘尾部未写的日志（含 shutdown 期间的）
   closeDb();
   process.exit(0);
 }

@@ -17,7 +17,9 @@ import { runTestSearch } from './tools/web-search.js';
 import { setSecret, getSecret, deleteSecret, secretAccount } from './secrets.js';
 import { registerObservRoutes } from './api-observ.js';
 import { registerStreamRoute } from './api-stream.js';
+import { registerLogRoutes } from './api-logs.js';
 import { registerSkillRoutes } from './api-skills.js';
+import { logCollector } from './log-collector.js';
 import { allowedOrigins } from './cors-origins.js';
 import { exportConfig, importConfig } from './config-io.js';
 
@@ -56,12 +58,14 @@ export function buildApi(): FastifyInstance {
   // ============================================================
   // Health
   // ============================================================
-  app.get('/api/health', async () => ({ ok: true, data: { status: 'ok', ts: Date.now() } }));
+  app.get('/api/health', async () => ({ ok: true, data: { status: 'ok', ts: Date.now(), logs: logCollector.stats() } }));
 
   // 可观测性查询 API（P4）：会话/消息/回合/事件分页 + 记忆浏览 + Live 总览
   registerObservRoutes(app);
   // 可观测性实时推送（P5）：SSE /api/stream?botId&sessionId&runId
   registerStreamRoute(app);
+  // 日志系统：原始运行日志查询/SSE 流/ingest/清空（/api/logs*）
+  registerLogRoutes(app);
   // Skill 系统 + 调度器（Phase 3.5）：skill CRUD + 调度面板聚合 + 手动触发
   registerSkillRoutes(app);
 
@@ -229,6 +233,22 @@ export function buildApi(): FastifyInstance {
     // 下线后同项目同伴应把它移出可协作名单 → 刷新同伴
     restartProjectPeers([projectId], id);
     return { ok: true, data: botManager.getStatus(id) };
+  });
+
+  // 手动重启（stop+start）：让运行中的实例按当前 DB 配置重建快照。仅对已启用 bot 放行——
+  // 未启用就 restart 会把它启到运行态、却与 DB enabled=false 不一致。重启不改身份/项目/在线性，
+  // 故无需 restartProjectPeers（同伴花名册引用的 name/role/projectId 未变）。
+  app.post('/api/bots/:id/restart', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const b = botRepo.get(id);
+    if (!b) return reply.code(404).send({ ok: false, error: 'Bot 不存在' });
+    if (!b.enabled) return reply.code(400).send({ ok: false, error: 'Bot 未启用，无法重启（请先启用）' });
+    try {
+      await botManager.restart(id);
+      return { ok: true, data: botManager.getStatus(id) };
+    } catch (e) {
+      return reply.code(500).send({ ok: false, error: (e as Error).message });
+    }
   });
 
   // ============================================================

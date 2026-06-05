@@ -18,13 +18,13 @@
 
   --border: 240 6% 90%;       /* zinc-200 发丝边框 */
   --border-strong: 240 5% 84%;/* zinc-300 */
-  --ring: 248 90% 66%;        /* 紫色强调——focus/选中 */
+  --ring: 235 86% 65%;        /* Discord blurple——focus/选中 */
 
-  --primary: 248 90% 66%;         /* #7361f6 周边紫 强调色(选中/图标/链接) */
-  --primary-strong: 247 64% 55%;  /* #5b4ad1 深一档:主按钮(达 AA) */
-  --primary-hover: 247 64% 48%;   /* 按钮 hover */
+  --primary: 235 86% 65%;         /* #5865F2 Discord blurple 强调色(选中/图标/链接) */
+  --primary-strong: 235 60% 56%;  /* 深一档:主按钮，白字达 WCAG AA */
+  --primary-hover: 235 56% 48%;   /* 按钮 hover */
   --primary-fg: 0 0% 100%;
-  --primary-soft: 246 100% 97%;   /* #eeecfe 浅紫:选中/图标底 */
+  --primary-soft: 234 100% 96%;   /* 浅 blurple:选中/图标底 */
 
   --success: 142 71% 45%; --success-fg: 142 64% 24%; --success-soft: 143 64% 96%;
   --warning: 38 92% 50%;  --warning-fg: 32 74% 27%;  --warning-soft: 43 96% 95%;
@@ -67,6 +67,15 @@
     outline: none;
     @apply ring-2 ring-ring/40;
   }
+}
+
+/* ===== 内容区氛围渐变（借鉴 Discord 开发者门户：左上紫 + 右上靛蓝的极淡光晕，落白底）===== */
+.app-shell-bg {
+  background:
+    radial-gradient(60% 55% at 0% 0%, hsl(var(--primary) / 0.13), transparent 72%),
+    radial-gradient(55% 45% at 100% 0%, hsl(var(--info) / 0.10), transparent 72%),
+    hsl(var(--bg));
+  background-attachment: fixed;
 }
 
 /* ===== 全局动效兜底：尊重系统「减少动态效果」 ===== */

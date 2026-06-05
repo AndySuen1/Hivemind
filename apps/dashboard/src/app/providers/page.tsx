@@ -61,7 +61,7 @@ export default function ProvidersPage() {
         subtitle="管理 LLM 模型供应商与 Web 搜索源凭证"
         actions={
           tab === 'models' ? (
-            <Button variant="primary" leftIcon={<Plus className="size-4" />} onClick={() => setEditing('new')}>
+            <Button variant="primary" size="lg" leftIcon={<Plus className="size-[18px]" />} onClick={() => setEditing('new')}>
               新建
             </Button>
           ) : undefined

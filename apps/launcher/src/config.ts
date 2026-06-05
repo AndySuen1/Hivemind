@@ -13,6 +13,7 @@ export interface LauncherConfig {
   autoStartService: boolean; // 启动器起来后自动拉起服务
   openLoginItem: boolean; // 期望开机自启（实际以 OS 回读为准）
   controlToken: string; // 控制 API 本地 token（防跨站调用 OS 级能力）
+  ingestToken: string; // 日志转发 token：launcher→orchestrator /api/logs/ingest 鉴权。**只**注入 orchestrator 子进程 env，绝不暴露给浏览器（区别于 controlToken）
   nodePath?: string; // 可选：手动指定系统 node 可执行文件
 }
 
@@ -25,6 +26,7 @@ function defaults(): LauncherConfig {
     autoStartService: true,
     openLoginItem: false,
     controlToken: randomBytes(24).toString('hex'),
+    ingestToken: randomBytes(24).toString('hex'),
   };
 }
 

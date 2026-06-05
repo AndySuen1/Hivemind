@@ -17,6 +17,7 @@ import type {
   ObservCursor,
   ObservMemoryList,
   LiveOverview,
+  LogPage,
   SkillSummary,
   SkillDetail,
   BotScheduleEntry,
@@ -72,6 +73,7 @@ export const botsApi = {
   delete: (id: string) => call<{ id: string }>(`/api/bots/${id}`, { method: 'DELETE' }),
   start: (id: string) => call<BotRuntimeInfo>(`/api/bots/${id}/start`, { method: 'POST' }),
   stop: (id: string) => call<BotRuntimeInfo>(`/api/bots/${id}/stop`, { method: 'POST' }),
+  restart: (id: string) => call<BotRuntimeInfo>(`/api/bots/${id}/restart`, { method: 'POST' }),
 };
 
 // ============================================================
@@ -143,6 +145,16 @@ export const observApi = {
     call<{ botId: string; sessions: number }>(`/api/bots/${botId}/history`, { method: 'DELETE' }),
   runRetention: () =>
     call<{ days: number; sessions: number }>(`/api/observ/retention/run`, { method: 'POST' }),
+};
+
+// ============================================================
+// 日志系统（原始运行日志）
+// ============================================================
+export const logsApi = {
+  list: (
+    opts: { before?: number; beforeId?: string; limit?: number; level?: string; source?: string; q?: string } = {}
+  ) => call<LogPage>(`/api/logs${qs(opts)}`),
+  clear: () => call<{ cleared: boolean }>('/api/logs', { method: 'DELETE' }),
 };
 
 // ============================================================

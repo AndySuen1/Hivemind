@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import type {
   ObservSession,
   ObservRun,
@@ -10,8 +11,18 @@ import type {
   ObservCursor,
   ObservMemoryEntry,
   ObservRecord,
+  Provider,
+  SkillSummary,
 } from '@hivemind/shared';
-import { observApi, botsApi, type BotWithRuntime } from '@/lib/api';
+import {
+  observApi,
+  botsApi,
+  providersApi,
+  projectsApi,
+  skillsApi,
+  type BotWithRuntime,
+  type ProjectWithMembers,
+} from '@/lib/api';
 import { useEventStream } from '@/lib/use-event-stream';
 import {
   fmtTime,
@@ -37,9 +48,17 @@ import {
   type TabItem,
 } from '@/components/ui';
 import { listEq } from '@/lib/shallow-eq';
-import { Activity, Brain, ListTree, MessageSquare, Trash2 } from 'lucide-react';
+import { BotConfigSection } from '@/components/bot/BotConfigSection';
+import { Activity, Brain, ListTree, MessageSquare, Power, RotateCw, Settings, Trash2 } from 'lucide-react';
 
-const TABS: TabItem[] = [
+// 顶层视图：设置 / 监控（两级页签的第一级）
+const VIEW_TABS: TabItem[] = [
+  { key: 'config', label: '设置', icon: Settings },
+  { key: 'monitor', label: '监控', icon: Activity },
+];
+
+// 监控子页签（沿用原有 4 项）
+const MONITOR_TABS: TabItem[] = [
   { key: 'live', label: '实时', icon: Activity },
   { key: 'chat', label: '聊天', icon: MessageSquare },
   { key: 'trace', label: '执行追踪', icon: ListTree },
@@ -48,12 +67,20 @@ const TABS: TabItem[] = [
 
 export default function BotDetailPage({ params }: { params: { id: string } }) {
   const botId = params.id;
-  const { value: tab, tabProps } = useTabs(TABS, { defaultKey: 'live', queryKey: 'tab' });
+  const router = useRouter();
+  // 两级页签各用独立 queryKey（view / tab），互不冲突；config 子页签的 ctab 在 BotConfigForm 内部。
+  const { value: view, tabProps: viewTabProps } = useTabs(VIEW_TABS, { defaultKey: 'monitor', queryKey: 'view' });
+  const { value: tab, tabProps: monitorTabProps } = useTabs(MONITOR_TABS, { defaultKey: 'live', queryKey: 'tab' });
   const [bot, setBot] = useState<BotWithRuntime | null>(null);
-  // 清空全部历史后自增：作为各 tab 的 key，强制重挂以清掉其内部缓存的会话/回合/feed 选择。
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [projects, setProjects] = useState<ProjectWithMembers[]>([]);
+  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
+  // 清空全部历史后自增：作为各监控 tab 的 key，强制重挂以清掉其内部缓存的会话/回合/feed 选择。
   const [reloadKey, setReloadKey] = useState(0);
   const [actionErr, setActionErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const confirm = useConfirm();
+  const { toast } = useToast();
 
   useEffect(() => {
     let alive = true;
@@ -62,7 +89,7 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
         .get(botId)
         .then((b) => {
           if (!alive) return;
-          // 内容相等短路：3s 轮询只关心运行态变化，避免无谓重渲染
+          // 内容相等短路：3s 轮询只关心运行态变化，避免无谓重渲染（也避免覆盖「设置」区未保存的编辑）
           setBot((prev) =>
             prev &&
             prev.runtime.status === b.runtime.status &&
@@ -81,6 +108,13 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
     };
   }, [botId]);
 
+  // 「设置」区需要的下拉/技能数据（挂载取一次即可）
+  useEffect(() => {
+    void providersApi.list().then(setProviders).catch(() => {});
+    void projectsApi.list().then(setProjects).catch(() => {});
+    void skillsApi.list().then(setAvailableSkills).catch(() => {});
+  }, []);
+
   const clearAll = async () => {
     const ok = await confirm({
       title: `清空 bot「${bot?.name ?? botId}」的全部历史？`,
@@ -98,15 +132,64 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
     }
   };
 
+  const togglePower = async () => {
+    if (!bot) return;
+    setBusy(true);
+    setActionErr(null);
+    try {
+      await botsApi.update(bot.id, { enabled: !bot.enabled });
+      setBot(await botsApi.get(bot.id));
+    } catch (e) {
+      setActionErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 手动重启：让运行中的实例按当前 DB 配置重建快照（stop+start）。仅对已启用 bot 可用。
+  const doRestart = async () => {
+    if (!bot) return;
+    setBusy(true);
+    setActionErr(null);
+    try {
+      await botsApi.restart(bot.id);
+      setBot(await botsApi.get(bot.id));
+      toast('已重启', { tone: 'success' });
+    } catch (e) {
+      setActionErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDelete = async () => {
+    if (!bot) return;
+    const ok = await confirm({
+      title: `删除 bot「${bot.name}」？`,
+      description: '该 bot 的配置与 Discord token 将被删除；监控历史可在「监控」里单独清空。',
+      confirmText: '删除',
+      danger: true,
+    });
+    if (!ok) return;
+    setActionErr(null);
+    try {
+      await botsApi.delete(bot.id);
+      toast('已删除', { tone: 'success' });
+      router.push('/bots');
+    } catch (e) {
+      setActionErr((e as Error).message);
+    }
+  };
+
   return (
     <PageContainer size="wide">
       <PageHeader
         breadcrumb={
           <>
-            <Link href="/observability" className="hover:underline">
-              监控
+            <Link href="/bots" className="hover:underline">
+              Bots
             </Link>{' '}
-            / bot
+            / {bot?.name ?? botId}
           </>
         }
         title={bot ? bot.name : <Skeleton className="h-8 w-48" />}
@@ -118,26 +201,76 @@ export default function BotDetailPage({ params }: { params: { id: string } }) {
               </span>
             )}
             <code className="text-[10px] text-fg-subtle">{botId}</code>
-            <Button
-              variant="danger"
-              size="sm"
-              leftIcon={<Trash2 className="size-4" />}
-              onClick={clearAll}
-              title="删除该 bot 的全部监控历史（会话 / 回合 / 消息 / 事件）"
-            >
-              清空全部历史
+            {bot && (
+              <Button size="sm" variant="secondary" leftIcon={<Power className="size-4" />} onClick={togglePower} disabled={busy}>
+                {bot.enabled ? '禁用' : '启用'}
+              </Button>
+            )}
+            {bot?.enabled && (
+              <Button
+                size="sm"
+                variant="secondary"
+                leftIcon={<RotateCw className="size-4" />}
+                onClick={doRestart}
+                disabled={busy}
+                title="按当前配置重启该 bot 实例（短暂离线后自动重连）"
+              >
+                重启
+              </Button>
+            )}
+            {view === 'monitor' && (
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<Trash2 className="size-4" />}
+                onClick={clearAll}
+                title="删除该 bot 的全部监控历史（会话 / 回合 / 消息 / 事件）"
+              >
+                清空历史
+              </Button>
+            )}
+            <Button variant="danger" size="sm" leftIcon={<Trash2 className="size-4" />} onClick={onDelete} title="删除该 bot">
+              删除 bot
             </Button>
           </>
         }
       />
-      {actionErr && <div className="mb-3 rounded bg-danger-soft p-2 text-xs text-danger-fg">清空失败：{actionErr}</div>}
+      {actionErr && <div className="mb-3 rounded bg-danger-soft p-2 text-xs text-danger-fg">操作失败：{actionErr}</div>}
 
-      <Tabs {...tabProps} className="mb-4" />
+      <div className="flex flex-col gap-6 lg:flex-row">
+        {/* 左：顶层视图竖排导航（设置 / 监控） */}
+        <Tabs {...viewTabProps} orientation="vertical" className="lg:w-44 lg:shrink-0" />
 
-      {tab === 'live' && <LiveTab key={reloadKey} botId={botId} />}
-      {tab === 'chat' && <ChatTab key={reloadKey} botId={botId} />}
-      {tab === 'trace' && <TraceTab key={reloadKey} botId={botId} />}
-      {tab === 'memory' && <MemoryTab botId={botId} />}
+        {/* 右：内容区 */}
+        <div className="min-w-0 flex-1">
+          {/* 「设置」区始终挂载、仅用 CSS 隐藏非激活视图——切到「监控」再切回不卸载 BotConfigSection，
+              其 baseline（还原基线）与未保存编辑得以存活到「刷新页面」为止（符合还原有效期=本次刷新内）。
+              监控区仍按需挂载/卸载（关掉 SSE 等开销）。 */}
+          {bot ? (
+            <div className={view === 'config' ? '' : 'hidden'}>
+              <BotConfigSection
+                bot={bot}
+                providers={providers}
+                projects={projects}
+                availableSkills={availableSkills}
+                onSaved={() => botsApi.get(botId).then(setBot).catch(() => {})}
+              />
+            </div>
+          ) : (
+            view === 'config' && <Skeleton className="h-64 w-full max-w-2xl rounded-lg" />
+          )}
+          {view === 'monitor' && (
+            <>
+              {/* 监控子页签仍横排，置于右栏顶部 */}
+              <Tabs {...monitorTabProps} className="mb-4" />
+              {tab === 'live' && <LiveTab key={reloadKey} botId={botId} />}
+              {tab === 'chat' && <ChatTab key={reloadKey} botId={botId} />}
+              {tab === 'trace' && <TraceTab key={reloadKey} botId={botId} />}
+              {tab === 'memory' && <MemoryTab botId={botId} />}
+            </>
+          )}
+        </div>
+      </div>
     </PageContainer>
   );
 }

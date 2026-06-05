@@ -11,7 +11,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <ConfirmProvider>
         <div className="flex min-h-screen">
           <SideNav />
-          <main className="min-w-0 flex-1 p-8 md:p-10">{children}</main>
+          <main className="app-shell-bg min-w-0 flex-1 p-8 md:p-10">{children}</main>
         </div>
       </ConfirmProvider>
     </ToastProvider>

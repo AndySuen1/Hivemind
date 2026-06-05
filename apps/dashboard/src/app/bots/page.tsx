@@ -1,34 +1,23 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { Pencil, Plus, Power, Puzzle, Sparkles, Trash2, Wrench, X } from 'lucide-react';
-import type { BotCreate, BotUpdate, BotTools, Provider, ScheduleItem, SkillSummary } from '@hivemind/shared';
-import { DEFAULT_DENY_PATTERNS } from '@hivemind/shared';
-import { botsApi, providersApi, projectsApi, skillsApi, type BotWithRuntime, type ProjectWithMembers } from '@/lib/api';
-import {
-  Badge,
-  Button,
-  Card,
-  EmptyState,
-  Field,
-  FormModal,
-  Input,
-  PageContainer,
-  PageHeader,
-  Select,
-  Skeleton,
-  StatusPill,
-  TabPanel,
-  Tabs,
-  Textarea,
-  useConfirm,
-  useTabs,
-  useToast,
-} from '@/components/ui';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { Plus } from 'lucide-react';
+import type { BotRuntimeStatus, Provider } from '@hivemind/shared';
+import { botsApi, providersApi, projectsApi, type BotWithRuntime, type ProjectWithMembers } from '@/lib/api';
+import { Button, EmptyState, PageContainer, PageHeader, Select, Skeleton } from '@/components/ui';
 import { listEq } from '@/lib/shallow-eq';
+import { cn } from '@/lib/utils';
+import { BotAvatar } from '@/components/bot/BotAvatar';
+import { NewBotModal } from '@/components/bot/NewBotModal';
 
-const linesToArr = (s: string): string[] =>
-  s.split('\n').map((x) => x.trim()).filter(Boolean);
+// 头像角标小圆点配色，按运行态（与 observ-ui 的 BOT_STATUS_COLOR 同义）。
+const BOT_DOT: Record<BotRuntimeStatus, string> = {
+  online: 'bg-success',
+  connecting: 'bg-warning',
+  offline: 'bg-fg-subtle',
+  error: 'bg-danger',
+};
 
 export default function BotsPage() {
   const [bots, setBots] = useState<BotWithRuntime[]>([]);
@@ -37,13 +26,27 @@ export default function BotsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+  // 项目筛选：'__all' 全部 · '__none' 未分组 · 其余为项目 id
+  const [projectFilter, setProjectFilter] = useState('__all');
 
   const refresh = async () => {
     try {
       const [b, p, pr] = await Promise.all([botsApi.list(), providersApi.list(), projectsApi.list()]);
-      // 内容相等短路：3s 轮询内容没变就不 setState，避免无谓重渲染/闪烁
+      // 内容相等短路：3s 轮询内容没变就不 setState，避免无谓重渲染/闪烁。
+      // key 含 name/role/avatar，使详情页改了配置后网格能刷新。
       setBots((prev) =>
-        listEq(prev, b, (x) => [x.id, x.runtime.status, x.enabled, x.runtime.errorMessage ?? '', x.projectId ?? '']) ? prev : b,
+        listEq(prev, b, (x) => [
+          x.id,
+          x.runtime.status,
+          x.enabled,
+          x.runtime.errorMessage ?? '',
+          x.projectId ?? '',
+          x.name,
+          x.role,
+          x.avatar ?? '',
+        ])
+          ? prev
+          : b,
       );
       setProviders((prev) => (listEq(prev, p, (x) => [x.id, x.name, x.model]) ? prev : p));
       setProjects((prev) => (listEq(prev, pr, (x) => [x.id, x.name]) ? prev : pr));
@@ -61,19 +64,29 @@ export default function BotsPage() {
     return () => clearInterval(t);
   }, []);
 
+  const visibleBots = bots.filter((b) =>
+    projectFilter === '__all'
+      ? true
+      : projectFilter === '__none'
+        ? !b.projectId
+        : b.projectId === projectFilter,
+  );
+
   return (
-    <PageContainer size="default">
+    <PageContainer size="wide">
       <PageHeader
         title="Bots"
+        subtitle="管理连接到 Discord 的 bot：头像、岗位、工具、技能与监控。"
         actions={
           <Button
             variant="primary"
-            leftIcon={<Plus className="size-4" />}
+            size="lg"
+            leftIcon={<Plus className="size-[18px]" />}
             disabled={providers.length === 0}
             title={providers.length === 0 ? '请先创建至少一个 Provider' : ''}
             onClick={() => setShowNew(true)}
           >
-            新建
+            新建 Bot
           </Button>
         }
       />
@@ -89,10 +102,37 @@ export default function BotsPage() {
         </div>
       )}
 
+      {/* 项目筛选工具栏：有 bot 就显示（无项目时下拉仅「全部 / 未分组」） */}
+      {!loading && bots.length > 0 && (
+        <div className="mb-5 flex flex-wrap items-center gap-3">
+          <label htmlFor="proj-filter" className="text-sm font-medium text-fg-muted">
+            项目筛选
+          </label>
+          <Select
+            id="proj-filter"
+            value={projectFilter}
+            onChange={(e) => setProjectFilter(e.target.value)}
+            className="h-10 w-52 rounded-lg"
+          >
+            <option value="__all">全部项目</option>
+            <option value="__none">未分组</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </Select>
+          <span className="text-sm text-fg-subtle">共 {visibleBots.length} 个</span>
+        </div>
+      )}
+
       {loading ? (
-        <div className="space-y-2">
-          {[0, 1, 2].map((i) => (
-            <Skeleton key={i} className="h-[132px] rounded-lg" />
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(132px,1fr))] gap-4">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} className="flex flex-col items-center gap-2.5 rounded-2xl bg-bg-hover p-3">
+              <Skeleton className="aspect-square w-full rounded-xl" />
+              <Skeleton className="h-4 w-2/3 rounded" />
+            </div>
           ))}
         </div>
       ) : bots.length === 0 ? (
@@ -100,814 +140,44 @@ export default function BotsPage() {
           title="还没有 bot"
           description="创建一个 bot 并启用，连接到 Discord。"
           action={
-            <Button
-              variant="primary"
-              leftIcon={<Plus className="size-4" />}
-              disabled={providers.length === 0}
-              onClick={() => setShowNew(true)}
-            >
+            <Button variant="primary" leftIcon={<Plus className="size-4" />} disabled={providers.length === 0} onClick={() => setShowNew(true)}>
               新建 Bot
             </Button>
           }
         />
+      ) : visibleBots.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border p-10 text-center text-sm text-fg-muted">
+          该项目下暂无 bot。
+          <button type="button" className="ml-1 text-primary-strong underline" onClick={() => setProjectFilter('__all')}>
+            查看全部
+          </button>
+        </div>
       ) : (
-        <div className="space-y-2">
-          {bots.map((b) => (
-            <BotRow key={b.id} bot={b} providers={providers} projects={projects} onChange={refresh} />
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(132px,1fr))] gap-4">
+          {visibleBots.map((b) => (
+            <Link
+              key={b.id}
+              href={`/bots/${b.id}`}
+              className="group flex flex-col items-center gap-2.5 rounded-2xl bg-bg-hover p-3 text-center shadow-xs transition duration-fast hover:-translate-y-0.5 hover:shadow-md hover:ring-1 hover:ring-border-strong"
+            >
+              <div className="relative w-full">
+                <BotAvatar name={b.name} avatar={b.avatar} id={b.id} fill rounded="xl" className="aspect-square w-full" />
+                {/* 连接态绿点（在线=绿）取代「已启用」文字 */}
+                <span
+                  className={cn('absolute bottom-1.5 right-1.5 size-3.5 rounded-full ring-2 ring-bg-card', BOT_DOT[b.runtime.status])}
+                  title={b.runtime.status}
+                />
+              </div>
+              <div className="min-w-0 w-full">
+                <div className="truncate text-sm font-medium text-fg">{b.name}</div>
+                {b.role && <div className="truncate text-xs text-fg-muted">{b.role}</div>}
+              </div>
+            </Link>
           ))}
         </div>
       )}
 
-      <BotForm
-        mode="create"
-        open={showNew}
-        providers={providers}
-        projects={projects}
-        onClose={() => setShowNew(false)}
-        onDone={() => {
-          setShowNew(false);
-          refresh();
-        }}
-      />
+      <NewBotModal open={showNew} providers={providers} projects={projects} onClose={() => setShowNew(false)} />
     </PageContainer>
-  );
-}
-
-function BotRow({
-  bot,
-  providers,
-  projects,
-  onChange,
-}: {
-  bot: BotWithRuntime;
-  providers: Provider[];
-  projects: ProjectWithMembers[];
-  onChange: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const provider = providers.find((p) => p.id === bot.providerId);
-  const confirm = useConfirm();
-  const { toast } = useToast();
-
-  const onToggleEnabled = async () => {
-    setBusy(true);
-    try {
-      await botsApi.update(bot.id, { enabled: !bot.enabled });
-      onChange();
-    } catch (e) {
-      toast((e as Error).message, { tone: 'danger' });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const onDelete = async () => {
-    const ok = await confirm({ title: `删除 bot "${bot.name}"？`, confirmText: '删除', danger: true });
-    if (!ok) return;
-    setBusy(true);
-    try {
-      await botsApi.delete(bot.id);
-      onChange();
-    } catch (e) {
-      toast((e as Error).message, { tone: 'danger' });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Card padding="none">
-      <div className="flex items-start justify-between gap-4 p-4">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-fg">{bot.name}</span>
-            <StatusPill kind="bot" status={bot.runtime.status} />
-            {bot.enabled && <span className="text-xs text-primary-strong">已启用</span>}
-          </div>
-          <div className="mt-1 space-y-0.5 text-xs text-fg-muted">
-            <div>
-              Provider: {provider?.name ?? '(已删除)'} →{' '}
-              <code className="rounded bg-bg-subtle px-1">{provider?.model ?? '?'}</code>
-              {' · '}temp <code className="rounded bg-bg-subtle px-1">{bot.temperature.toFixed(1)}</code>
-              {bot.allowedRequesters.length > 0 && ` · allowlist ${bot.allowedRequesters.length} 人`}
-              {bot.projectId &&
-                ` · 项目「${projects.find((p) => p.id === bot.projectId)?.name ?? '?'}」`}
-            </div>
-            <ToolBadges tools={bot.tools} />
-            <div className="break-all text-fg-subtle">
-              系统提示词：{bot.systemPrompt.slice(0, 80)}
-              {bot.systemPrompt.length > 80 ? '…' : ''}
-            </div>
-            <div className="text-fg-subtle">
-              ID: <code className="text-[10px]">{bot.id}</code>
-            </div>
-          </div>
-          {bot.runtime.errorMessage && (
-            <div className="mt-2 rounded bg-danger-soft p-2 text-xs text-danger-fg">⚠️ {bot.runtime.errorMessage}</div>
-          )}
-        </div>
-        <div className="flex flex-shrink-0 gap-2">
-          <Button size="sm" leftIcon={<Power className="size-4" />} onClick={onToggleEnabled} disabled={busy}>
-            {bot.enabled ? '禁用' : '启用'}
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            leftIcon={<Pencil className="size-4" />}
-            onClick={() => setEditing(true)}
-            disabled={busy}
-          >
-            编辑
-          </Button>
-          <Button size="sm" variant="danger" leftIcon={<Trash2 className="size-4" />} onClick={onDelete} disabled={busy}>
-            删除
-          </Button>
-        </div>
-      </div>
-
-      <BotForm
-        mode="edit"
-        open={editing}
-        existing={bot}
-        providers={providers}
-        projects={projects}
-        onClose={() => setEditing(false)}
-        onDone={() => {
-          setEditing(false);
-          onChange();
-        }}
-      />
-    </Card>
-  );
-}
-
-type BotFormProps = {
-  open: boolean;
-  onClose: () => void;
-  providers: Provider[];
-  projects: ProjectWithMembers[];
-  onDone: () => void;
-} & ({ mode: 'create'; existing?: never } | { mode: 'edit'; existing: BotWithRuntime });
-
-function BotForm(props: BotFormProps) {
-  const { open, onClose, providers, projects, onDone } = props;
-  const isEdit = props.mode === 'edit';
-  const existing = props.mode === 'edit' ? props.existing : undefined;
-  const firstProvider = providers[0];
-
-  const [name, setName] = useState('');
-  const [providerId, setProviderId] = useState('');
-  const [systemPrompt, setSystemPrompt] = useState('你是一个友好、简洁的中文助手。');
-  const [role, setRole] = useState('');
-  const [temperature, setTemperature] = useState(1.3);
-  const [allowedRaw, setAllowedRaw] = useState('');
-  const [enabled, setEnabled] = useState(true);
-  const [discordToken, setDiscordToken] = useState('');
-
-  // 工具配置
-  const [wsDirs, setWsDirs] = useState('');
-  const [fsEnabled, setFsEnabled] = useState(false);
-  const [bashEnabled, setBashEnabled] = useState(false);
-  const [bashDeny, setBashDeny] = useState(DEFAULT_DENY_PATTERNS.join('\n'));
-  const [bashTimeout, setBashTimeout] = useState(30000);
-  const [memEnabled, setMemEnabled] = useState(false);
-  const [webEnabled, setWebEnabled] = useState(false);
-  const [claudeEnabled, setClaudeEnabled] = useState(false);
-  const [claudeMaxTurns, setClaudeMaxTurns] = useState(30);
-  const [claudeTimeoutMin, setClaudeTimeoutMin] = useState(20);
-  // 对话记忆（窗口/摘要/检索）。windowTurns=0 表示用全局默认 BOT_HISTORY_TURNS。
-  const [convWindow, setConvWindow] = useState(0);
-  const [convSummary, setConvSummary] = useState(true);
-  const [convRetrieval, setConvRetrieval] = useState(true);
-  // 所属项目（Inter-Agent 协作分组）。'' = 不在任何项目。同项目的 bot 可互相 @。
-  const [projectId, setProjectId] = useState('');
-  // 技能 · 调度（Phase 3.5）
-  const [skills, setSkills] = useState<string[]>([]);
-  const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
-  const [pushEnabled, setPushEnabled] = useState(false);
-  const [pushChannels, setPushChannels] = useState('');
-  const [availableSkills, setAvailableSkills] = useState<SkillSummary[]>([]);
-
-  const [submitting, setSubmitting] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const nameRef = useRef<HTMLInputElement>(null);
-
-  const tabs = useTabs([
-    { key: 'basic', label: '基本设置' },
-    { key: 'tools', label: '工具配置', icon: Wrench },
-    { key: 'skills', label: '技能 · 调度', icon: Puzzle },
-    { key: 'advanced', label: '高级 · 委派', icon: Sparkles },
-  ]);
-
-  // 打开时（或编辑目标变化）从 existing 重置初值；用可选链兜底旧库数据缺 conversationMemory 段。
-  useEffect(() => {
-    if (!open) return;
-    const t = existing?.tools;
-    setName(existing?.name ?? '');
-    setProviderId(existing?.providerId ?? firstProvider?.id ?? '');
-    setSystemPrompt(existing?.systemPrompt ?? '你是一个友好、简洁的中文助手。');
-    setRole(existing?.role ?? '');
-    setTemperature(existing?.temperature ?? 1.3);
-    setAllowedRaw(existing?.allowedRequesters.join('\n') ?? '');
-    setEnabled(existing?.enabled ?? true);
-    setDiscordToken('');
-    setWsDirs(t?.workspaceDirs.join('\n') ?? '');
-    setFsEnabled(t?.fs.enabled ?? false);
-    setBashEnabled(t?.bash.enabled ?? false);
-    setBashDeny((t?.bash.denyPatterns ?? DEFAULT_DENY_PATTERNS).join('\n'));
-    setBashTimeout(t?.bash.timeoutMs ?? 30000);
-    setMemEnabled(t?.memory.enabled ?? false);
-    setWebEnabled(t?.webSearch.enabled ?? false);
-    setClaudeEnabled(t?.claudeCode.enabled ?? false);
-    setClaudeMaxTurns(t?.claudeCode.maxTurns ?? 30);
-    setClaudeTimeoutMin(Math.round((t?.claudeCode.timeoutMs ?? 1_200_000) / 60000));
-    setConvWindow(t?.conversationMemory?.windowTurns ?? 0);
-    setConvSummary(t?.conversationMemory?.summaryEnabled ?? true);
-    setConvRetrieval(t?.conversationMemory?.retrievalEnabled ?? true);
-    setProjectId(existing?.projectId ?? '');
-    setSkills(existing?.skills ?? []);
-    setSchedule(existing?.schedule ?? []);
-    setPushEnabled(t?.discordPush?.enabled ?? false);
-    setPushChannels((t?.discordPush?.channelIds ?? []).join('\n'));
-    void skillsApi.list().then(setAvailableSkills).catch(() => setAvailableSkills([]));
-    setErr(null);
-    setSubmitting(false);
-    tabs.setValue('basic');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, existing?.id]);
-
-  const selectedProvider = providers.find((p) => p.id === providerId);
-
-  const onSubmit = async () => {
-    setSubmitting(true);
-    setErr(null);
-    try {
-      const allowedRequesters = allowedRaw
-        .split(/[,\s\n]+/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      const tools: BotTools = {
-        workspaceDirs: linesToArr(wsDirs),
-        fs: { enabled: fsEnabled },
-        bash: {
-          enabled: bashEnabled,
-          denyPatterns: linesToArr(bashDeny),
-          timeoutMs: bashTimeout,
-        },
-        memory: { enabled: memEnabled },
-        conversationMemory: {
-          summaryEnabled: convSummary,
-          retrievalEnabled: convRetrieval,
-          ...(convWindow > 0 ? { windowTurns: convWindow } : {}),
-        },
-        webSearch: { enabled: webEnabled },
-        claudeCode: {
-          enabled: claudeEnabled,
-          maxTurns: claudeMaxTurns,
-          timeoutMs: Math.max(1, claudeTimeoutMin) * 60000,
-        },
-        discordPush: { enabled: pushEnabled, channelIds: linesToArr(pushChannels) },
-      };
-
-      // 丢掉 cron/prompt 为空的 schedule 行
-      const cleanSchedule = schedule.filter((r) => r.cron.trim() && r.prompt.trim());
-
-      if (isEdit && existing) {
-        const patch: BotUpdate = {
-          name,
-          providerId,
-          systemPrompt,
-          role,
-          temperature,
-          tools,
-          allowedRequesters,
-          projectId: projectId || null,
-          skills,
-          schedule: cleanSchedule,
-          enabled,
-        };
-        if (discordToken) patch.discordToken = discordToken;
-        await botsApi.update(existing.id, patch);
-      } else {
-        if (!discordToken) throw new Error('新建时 Discord Token 必填');
-        const input: BotCreate = {
-          name,
-          providerId,
-          systemPrompt,
-          role,
-          temperature,
-          tools,
-          projectId: projectId || null,
-          allowedRequesters,
-          skills,
-          schedule: cleanSchedule,
-          enabled,
-          discordToken,
-        };
-        await botsApi.create(input);
-      }
-      onDone();
-    } catch (e2) {
-      setErr((e2 as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <FormModal
-      open={open}
-      onClose={onClose}
-      title={isEdit && existing ? `编辑「${existing.name}」` : '新建 Bot'}
-      size="lg"
-      onSubmit={onSubmit}
-      submitting={submitting}
-      error={err}
-      initialFocusRef={nameRef}
-    >
-      <Tabs {...tabs.tabProps} />
-      <div className="mt-4 max-h-[60vh] space-y-3 overflow-y-auto pr-1">
-        {/* —— 基本设置 —— */}
-        <TabPanel tabKey="basic" activeKey={tabs.value} className="space-y-3">
-          <Field label="Bot 名称（日志/列表显示，非 Discord 显示名）">
-            <Input ref={nameRef} value={name} onChange={(e) => setName(e.target.value)} placeholder="PM-Alice" required />
-          </Field>
-          <Field
-            label={isEdit ? 'Discord Bot Token（留空 = 保持原值）' : 'Discord Bot Token（存入 Windows Credential Manager）'}
-          >
-            <Input
-              type="password"
-              value={discordToken}
-              onChange={(e) => setDiscordToken(e.target.value)}
-              placeholder={isEdit ? '••••••••（不改就留空）' : ''}
-              className="font-mono"
-              required={!isEdit}
-            />
-          </Field>
-          <Field
-            label="Provider（决定用哪个 API endpoint + 模型）"
-            hint={
-              selectedProvider ? (
-                <>
-                  想用别的模型？去{' '}
-                  <a href="/providers" className="underline">
-                    Providers
-                  </a>{' '}
-                  多加一个（API key 可以一样，model 不同）
-                </>
-              ) : undefined
-            }
-          >
-            <Select value={providerId} onChange={(e) => setProviderId(e.target.value)} required>
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} → {p.model}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field label="系统提示词（人格/工种）">
-            <Textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} rows={4} />
-          </Field>
-          <Field label="岗位 / 工种（如 程序 / 策划 / 项目经理；同项目成员会自动看到彼此的岗位与分工，无需在提示词里手写团队名单）">
-            <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder="如：程序" />
-          </Field>
-          <Field
-            label={`Temperature: ${temperature.toFixed(1)}（DeepSeek 官方推荐：编程/数学 0.0 · 数据分析 1.0 · 对话/翻译 1.3 · 创作 1.5）`}
-          >
-            <input
-              type="range"
-              min={0}
-              max={2}
-              step={0.1}
-              value={temperature}
-              onChange={(e) => setTemperature(Number(e.target.value))}
-              className="w-full accent-primary-strong"
-            />
-            <div className="mt-1 flex justify-between text-[10px] text-fg-subtle">
-              <span>0.0 严谨</span>
-              <span>1.0</span>
-              <span>1.3 对话</span>
-              <span>1.5 创作</span>
-              <span>2.0 发散</span>
-            </div>
-          </Field>
-          <Field label="Allowlist Discord User ID（多个用逗号/空格/换行分隔，留空 = 不限制）">
-            <Textarea
-              value={allowedRaw}
-              onChange={(e) => setAllowedRaw(e.target.value)}
-              placeholder="1234567890123456789"
-              rows={2}
-              className="font-mono"
-            />
-          </Field>
-          <Field label="所属项目（同项目的 bot 可互相 @ 协作；去「项目」页管理成员与预算）">
-            <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-              <option value="">（不加入任何项目）</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <label className="flex items-center gap-2 text-sm text-fg">
-            <input
-              type="checkbox"
-              className="accent-primary-strong"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
-            />
-            启用（连接 Discord）
-          </label>
-        </TabPanel>
-
-        {/* —— 工具配置 —— */}
-        <TabPanel tabKey="tools" activeKey={tabs.value} className="space-y-3">
-          {/* 工作目录白名单：fs/bash/claude 共用，只在勾了任一时显示 */}
-          {(fsEnabled || bashEnabled || claudeEnabled) && (
-            <div className="rounded border border-info/30 bg-info-soft/50 p-3">
-              <div className="mb-1 text-[11px] font-medium text-info-fg">
-                工作目录白名单（fs / bash / Claude 委派共用：fs 的可访问范围 + bash 与 Claude 子进程的起始
-                cwd；每行一个绝对路径，留空 = 全部拒绝）
-              </div>
-              <Textarea
-                value={wsDirs}
-                onChange={(e) => setWsDirs(e.target.value)}
-                rows={2}
-                placeholder={'D:\\workspaces\\bot-a'}
-                className="font-mono text-xs"
-              />
-              <div className="mt-1 text-[10px] text-fg-subtle">
-                ⚠️ bash 的命令可用绝对路径越出此范围（cwd 只是起始目录、不是沙箱）；真正的访问控制靠下面的
-                allowlist。bash/fs 只给可信 bot。
-              </div>
-            </div>
-          )}
-
-          {/* fs */}
-          <ToolCard>
-            <ToolHeader
-              checked={fsEnabled}
-              onChange={setFsEnabled}
-              title="文件系统 fs"
-              desc="read / write / edit / list / grep（范围 = 工作目录）"
-            />
-          </ToolCard>
-
-          {/* bash */}
-          <ToolCard>
-            <ToolHeader
-              checked={bashEnabled}
-              onChange={setBashEnabled}
-              title="命令行 bash"
-              desc="run_command（cwd = 工作目录 + 命令黑名单 + 超时）"
-            />
-            {bashEnabled && (
-              <div className="mt-2 space-y-2">
-                <Field label="命令黑名单（子串匹配，大小写不敏感，每行一条）">
-                  <Textarea
-                    value={bashDeny}
-                    onChange={(e) => setBashDeny(e.target.value)}
-                    rows={3}
-                    className="font-mono text-xs"
-                  />
-                </Field>
-                <Field label="单条命令超时（毫秒）" className="w-40">
-                  <Input
-                    type="number"
-                    min={1000}
-                    max={600000}
-                    step={1000}
-                    value={bashTimeout}
-                    onChange={(e) => setBashTimeout(Number(e.target.value))}
-                  />
-                </Field>
-              </div>
-            )}
-          </ToolCard>
-
-          {/* memory */}
-          <ToolCard>
-            <ToolHeader
-              checked={memEnabled}
-              onChange={setMemEnabled}
-              title="长期记忆 memory"
-              desc={
-                <>
-                  跨会话，存于 bot-memory/&lt;botId&gt;/
-                </>
-              }
-            />
-            {memEnabled && (
-              <div className="mt-1 text-[11px] text-fg-muted">
-                开启后，达一定轮数或会话空闲时会自动把对话要点「整理」固化进上面的长期记忆文件（合并去重、总量封顶）。
-              </div>
-            )}
-          </ToolCard>
-
-          {/* 对话记忆：窗口 / 摘要 / 检索 */}
-          <ToolCard>
-            <div className="text-sm font-medium text-fg">对话记忆（会话连续性）</div>
-            <div className="mt-1 text-[11px] text-fg-subtle">
-              决定 bot「还记得多久前的对话」。重启后会从历史自动复原。与上面的长期记忆文件是两套机制。
-            </div>
-            <div className="mt-2 space-y-2">
-              <Field label="近期逐字窗口（轮数，0 = 用全局默认 BOT_HISTORY_TURNS=20）" className="w-32">
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={convWindow}
-                  onChange={(e) => setConvWindow(Number(e.target.value))}
-                />
-              </Field>
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="accent-primary-strong"
-                  checked={convSummary}
-                  onChange={(e) => setConvSummary(e.target.checked)}
-                />
-                <span className="text-xs">滚动摘要（把更早对话压缩成摘要，记住整段会话且省 token）</span>
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="accent-primary-strong"
-                  checked={convRetrieval}
-                  onChange={(e) => setConvRetrieval(e.target.checked)}
-                />
-                <span className="text-xs">历史检索（按当前提问从更早消息召回相关片段）</span>
-              </label>
-            </div>
-          </ToolCard>
-
-          {/* web search */}
-          <ToolCard>
-            <ToolHeader checked={webEnabled} onChange={setWebEnabled} title="联网搜索 web_search" />
-            {webEnabled && (
-              <div className="mt-1 text-[11px] text-fg-muted">
-                开启即用——系统自动按优先级{' '}
-                <code className="rounded bg-bg-subtle px-1">SearXNG → Brave → Tavily → DuckDuckGo</code>{' '}
-                选「已配置且当天还有余量」的源（在{' '}
-                <a href="/providers" className="underline">
-                  Providers
-                </a>{' '}
-                页配 key/URL）。无需勾选或设上限；内置防失控护栏。
-              </div>
-            )}
-          </ToolCard>
-        </TabPanel>
-
-        {/* —— 技能 · 调度 —— */}
-        <TabPanel tabKey="skills" activeKey={tabs.value} className="space-y-3">
-          {/* 启用 skill */}
-          <ToolCard>
-            <div className="text-sm font-medium text-fg">启用技能（Skill）</div>
-            <div className="mt-1 text-[11px] text-fg-subtle">
-              勾选的 skill 的 SKILL.md 会拼进本 bot 的 system prompt（领域玩法/SOP）。去
-              <a href="/skills" className="underline">技能</a>页新建/编辑。
-            </div>
-            {availableSkills.length === 0 ? (
-              <div className="mt-2 text-[11px] text-fg-subtle">还没有任何 skill —— 先去「技能」页新建一个。</div>
-            ) : (
-              <div className="mt-2 max-h-44 space-y-1 overflow-y-auto rounded border border-border bg-bg p-2">
-                {availableSkills.map((s) => (
-                  <label key={s.name} className="flex items-start gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5 accent-primary-strong"
-                      checked={skills.includes(s.name)}
-                      onChange={(e) =>
-                        setSkills((prev) => (e.target.checked ? [...new Set([...prev, s.name])] : prev.filter((x) => x !== s.name)))
-                      }
-                    />
-                    <span className="min-w-0">
-                      <span className="text-fg">{s.name}</span>
-                      {s.description && <span className="ml-1 text-[11px] text-fg-subtle">— {s.description}</span>}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            )}
-            {/* 选中但已不存在的 skill（编辑旧配置时）提示 */}
-            {skills.filter((n) => !availableSkills.some((s) => s.name === n)).map((n) => (
-              <div key={n} className="mt-1 text-[10px] text-warning-fg">
-                ⚠️ 已启用「{n}」但该 skill 不存在（已被删除？运行时会被跳过）。
-                <button type="button" className="ml-1 underline" onClick={() => setSkills((p) => p.filter((x) => x !== n))}>
-                  移除
-                </button>
-              </div>
-            ))}
-          </ToolCard>
-
-          {/* discord_push */}
-          <ToolCard>
-            <ToolHeader
-              checked={pushEnabled}
-              onChange={setPushEnabled}
-              title="📤 主动推送 discord_push"
-              desc="允许 bot 主动把消息推到指定频道（不必等用户问）"
-            />
-            {pushEnabled && (
-              <Field label="可推送的频道白名单（每行一个 channel id；留空 = 全部拒绝）" className="mt-2">
-                <Textarea
-                  value={pushChannels}
-                  onChange={(e) => setPushChannels(e.target.value)}
-                  rows={2}
-                  className="font-mono text-xs"
-                  placeholder={'123456789012345678'}
-                />
-              </Field>
-            )}
-          </ToolCard>
-
-          {/* schedule 编辑器 */}
-          <ToolCard>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-sm font-medium text-fg">定时任务（调度器）</div>
-                <div className="mt-1 text-[11px] text-fg-subtle">
-                  到点把 prompt 当一回合注入触发执行。cron 5 段：
-                  <code className="rounded bg-bg-subtle px-1">分 时 日 月 周</code>（如{' '}
-                  <code className="rounded bg-bg-subtle px-1">0 9 * * 1-5</code> = 工作日 9 点）。改了保存会重启本 bot。
-                </div>
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                leftIcon={<Plus className="size-3.5" />}
-                onClick={() => setSchedule((s) => [...s, { cron: '', prompt: '', enabled: true }])}
-              >
-                新增一条
-              </Button>
-            </div>
-            {schedule.length === 0 ? (
-              <div className="mt-2 text-[11px] text-fg-subtle">暂无定时任务。</div>
-            ) : (
-              <div className="mt-2 space-y-2">
-                {schedule.map((row, i) => (
-                  <div key={i} className="rounded border border-border bg-bg p-2">
-                    <div className="flex items-center gap-2">
-                      <Input
-                        value={row.cron}
-                        onChange={(e) => setSchedule((s) => s.map((r, j) => (j === i ? { ...r, cron: e.target.value } : r)))}
-                        placeholder="0 9 * * 1-5"
-                        className="w-36 font-mono text-xs"
-                      />
-                      <label className="flex items-center gap-1 text-[11px] text-fg-muted">
-                        <input
-                          type="checkbox"
-                          className="accent-primary-strong"
-                          checked={row.enabled}
-                          onChange={(e) => setSchedule((s) => s.map((r, j) => (j === i ? { ...r, enabled: e.target.checked } : r)))}
-                        />
-                        启用
-                      </label>
-                      <button
-                        type="button"
-                        className="ml-auto text-fg-subtle hover:text-danger-fg"
-                        title="删除这条"
-                        onClick={() => setSchedule((s) => s.filter((_, j) => j !== i))}
-                      >
-                        <X className="size-4" />
-                      </button>
-                    </div>
-                    <Input
-                      value={row.prompt}
-                      onChange={(e) => setSchedule((s) => s.map((r, j) => (j === i ? { ...r, prompt: e.target.value } : r)))}
-                      placeholder="到点要 bot 做什么（如：播报一下当前状态）"
-                      className="mt-2 text-xs"
-                    />
-                    <Input
-                      value={row.targetChannelId ?? ''}
-                      onChange={(e) =>
-                        setSchedule((s) => s.map((r, j) => (j === i ? { ...r, targetChannelId: e.target.value || undefined } : r)))
-                      }
-                      placeholder="目标频道 id（可选，填了就把结果直接发该频道；留空则靠 skill 内 discord_push）"
-                      className="mt-2 font-mono text-xs"
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
-          </ToolCard>
-        </TabPanel>
-
-        {/* —— 高级 · 委派 —— */}
-        <TabPanel tabKey="advanced" activeKey={tabs.value} className="space-y-3">
-          <ToolCard>
-            <ToolHeader
-              checked={claudeEnabled}
-              onChange={setClaudeEnabled}
-              title="🤖 Claude Code 委派 delegate_to_claude"
-              desc="复杂工程任务交给 Claude（走本机订阅）"
-            />
-            {claudeEnabled && (
-              <div className="mt-2 space-y-2">
-                <div className="flex gap-3">
-                  <Field label="最大轮数（防失控）" className="w-32">
-                    <Input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={claudeMaxTurns}
-                      onChange={(e) => setClaudeMaxTurns(Number(e.target.value))}
-                    />
-                  </Field>
-                  <Field label="单次超时（分钟）" className="w-32">
-                    <Input
-                      type="number"
-                      min={1}
-                      max={60}
-                      value={claudeTimeoutMin}
-                      onChange={(e) => setClaudeTimeoutMin(Number(e.target.value))}
-                    />
-                  </Field>
-                </div>
-                <div className="text-[11px] text-fg-muted">
-                  Claude 在「工具配置」段的工作目录内干活。危险操作（删文件 / git push / 联网 / 装包）和澄清问题会
-                  <strong>弹 Discord 按钮/菜单</strong>等你批准；只读与普通写自动放行。并发受限（单 bot 1 个 / 全局 5
-                  个）。
-                </div>
-                <div className="text-[10px] text-warning-fg">
-                  ⚠️ 计费：6/15 起 Agent SDK 用量走独立的「Agent SDK
-                  月度额度」（与交互式 Claude Code 分开），用尽不回落。上线前请去 claude.ai 确认 opt-in 与额度。
-                </div>
-              </div>
-            )}
-          </ToolCard>
-          {claudeEnabled && !(fsEnabled || bashEnabled) && (
-            <div className="text-[11px] text-fg-subtle">
-              提示：记得到「工具配置」段填好工作目录白名单，Claude 才有干活的地方。
-            </div>
-          )}
-
-          <div className="rounded border border-border bg-bg-subtle p-3 text-[11px] text-fg-muted">
-            🤝 跨 bot 协作（mention_bot）现在由「项目」驱动：把本 bot 和同伴编进同一个「项目」，它们就能在频道里
-            互相 @ 转交任务——在「基本设置」选所属项目，或去「项目」页统一编组。转交预算（跳数 / 成本）挂在项目上。
-          </div>
-        </TabPanel>
-      </div>
-    </FormModal>
-  );
-}
-
-/** 工具卡外壳：在白底 Modal 内用浅灰底区分各工具模块。 */
-function ToolCard({ children }: { children: React.ReactNode }) {
-  return <div className="rounded border border-border bg-bg-subtle p-3">{children}</div>;
-}
-
-/** 工具开关行：复选框 + 标题 + 说明。 */
-function ToolHeader({
-  checked,
-  onChange,
-  title,
-  desc,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  title: string;
-  desc?: React.ReactNode;
-}) {
-  return (
-    <label className="flex items-center gap-2">
-      <input
-        type="checkbox"
-        className="accent-primary-strong"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <span className="text-sm font-medium text-fg">{title}</span>
-      {desc && <span className="text-[11px] text-fg-subtle">{desc}</span>}
-    </label>
-  );
-}
-
-function ToolBadges({ tools }: { tools?: BotTools }) {
-  if (!tools) return null;
-  const active: string[] = [];
-  if (tools.fs.enabled) active.push('fs');
-  if (tools.bash.enabled) active.push('bash');
-  if (tools.claudeCode.enabled) active.push('claude');
-  if (tools.fs.enabled || tools.bash.enabled || tools.claudeCode.enabled)
-    active.push(`dirs(${tools.workspaceDirs.length})`);
-  if (tools.memory.enabled) active.push('memory');
-  if (tools.webSearch.enabled) active.push('web');
-  if (tools.discordPush?.enabled) active.push('push');
-  if (active.length === 0) return <div className="text-fg-subtle">工具：无</div>;
-  return (
-    <div className="flex flex-wrap items-center gap-1">
-      <span className="text-fg-subtle">工具：</span>
-      {active.map((a) => (
-        <Badge key={a} tone="info">
-          {a}
-        </Badge>
-      ))}
-    </div>
   );
 }

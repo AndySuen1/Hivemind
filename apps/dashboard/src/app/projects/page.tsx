@@ -1,13 +1,16 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Plus, FolderKanban } from 'lucide-react';
-import type { ProjectCreate, ProjectUpdate } from '@hivemind/shared';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { Plus, ArrowUpRight, Coins } from 'lucide-react';
 import { projectsApi, botsApi, type ProjectWithMembers, type BotWithRuntime } from '@/lib/api';
+import { buildProjectCreate, emptyProjectFormState } from '@/lib/project-form';
+import { AvatarStack, type AvatarStackMember } from '@/components/bot/AvatarStack';
+import { MemberPicker } from '@/components/project/MemberPicker';
 import {
   Badge,
   Button,
-  Card,
   EmptyState,
   Field,
   FormModal,
@@ -15,9 +18,6 @@ import {
   PageContainer,
   PageHeader,
   Skeleton,
-  Textarea,
-  useConfirm,
-  useToast,
 } from '@/components/ui';
 
 export default function ProjectsPage() {
@@ -25,7 +25,7 @@ export default function ProjectsPage() {
   const [bots, setBots] = useState<BotWithRuntime[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [editing, setEditing] = useState<ProjectWithMembers | 'new' | null>(null);
+  const [showNew, setShowNew] = useState(false);
 
   const refresh = async () => {
     try {
@@ -50,7 +50,7 @@ export default function ProjectsPage() {
         title="项目"
         subtitle="把一组员工 bot 编进同一个项目，同项目的 bot 可互相 @ 协作（无需逐个配白名单）。转交预算挂在项目上。"
         actions={
-          <Button variant="primary" leftIcon={<Plus className="size-4" />} onClick={() => setEditing('new')} disabled={loading}>
+          <Button variant="primary" size="lg" leftIcon={<Plus className="size-[18px]" />} onClick={() => setShowNew(true)} disabled={loading}>
             新建项目
           </Button>
         }
@@ -59,9 +59,9 @@ export default function ProjectsPage() {
       {err && <div className="mb-4 rounded bg-danger-soft p-3 text-sm text-danger-fg">{err}</div>}
 
       {loading ? (
-        <div className="space-y-2">
-          {[0, 1].map((i) => (
-            <Skeleton key={i} className="h-[96px] rounded-lg" />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-[150px] rounded-2xl" />
           ))}
         </div>
       ) : projects.length === 0 ? (
@@ -69,131 +69,88 @@ export default function ProjectsPage() {
           title="还没有项目"
           description="新建一个项目，把要协作的几个 bot 加进来——它们就能在频道里互相 @ 转交任务了。"
           action={
-            <Button variant="primary" leftIcon={<Plus className="size-4" />} onClick={() => setEditing('new')}>
+            <Button variant="primary" leftIcon={<Plus className="size-4" />} onClick={() => setShowNew(true)}>
               新建项目
             </Button>
           }
         />
       ) : (
-        <div className="space-y-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {projects.map((p) => (
-            <ProjectRow key={p.id} project={p} bots={bots} onEdit={() => setEditing(p)} onChange={refresh} />
+            <ProjectCard key={p.id} project={p} bots={bots} />
           ))}
         </div>
       )}
 
-      <ProjectFormModal
-        open={editing !== null}
-        mode={editing === 'new' ? 'create' : 'edit'}
-        existing={editing !== 'new' && editing !== null ? editing : undefined}
+      <NewProjectModal
+        open={showNew}
         bots={bots}
         projects={projects}
-        onClose={() => setEditing(null)}
-        onDone={() => {
-          setEditing(null);
-          refresh();
-        }}
+        onClose={() => setShowNew(false)}
       />
     </PageContainer>
   );
 }
 
-function ProjectRow({
-  project,
-  bots,
-  onEdit,
-  onChange,
-}: {
-  project: ProjectWithMembers;
-  bots: BotWithRuntime[];
-  onEdit: () => void;
-  onChange: () => void;
-}) {
-  const confirm = useConfirm();
-  const { toast } = useToast();
-  const memberNames = project.memberBotIds
-    .map((id) => bots.find((b) => b.id === id)?.name ?? id.slice(0, 8))
-    .filter(Boolean);
-
-  const onDelete = async () => {
-    const ok = await confirm({
-      title: `删除项目「${project.name}」？`,
-      description: '成员 bot 不会被删除，只是移出本项目（随之失去互相 @ 的能力）。',
-      confirmText: '删除',
-      danger: true,
-    });
-    if (!ok) return;
-    try {
-      await projectsApi.delete(project.id);
-      onChange();
-    } catch (e) {
-      toast((e as Error).message, { tone: 'danger' });
-    }
-  };
+function ProjectCard({ project, bots }: { project: ProjectWithMembers; bots: BotWithRuntime[] }) {
+  const members: AvatarStackMember[] = project.memberBotIds.map((id) => {
+    const b = bots.find((x) => x.id === id);
+    return { id, name: b?.name ?? id.slice(0, 8), avatar: b?.avatar };
+  });
+  const maxCost = project.maxCostUsd ?? 0;
+  const maxTurns = project.maxTurnsPerTask ?? 6;
 
   return (
-    <Card padding="md">
-      <div className="flex items-start justify-between gap-4">
+    <Link
+      href={`/projects/${project.id}`}
+      className="group relative flex flex-col gap-3 overflow-hidden rounded-2xl bg-bg-hover p-5 shadow-sm transition duration-fast ease-notion hover:-translate-y-0.5 hover:shadow-md hover:ring-1 hover:ring-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+    >
+      {/* 头部行：项目名（放大当主角）/ 描述 + 进入箭头（hover 浮现） */}
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <FolderKanban className="size-4 text-fg-subtle" />
-            <span className="font-semibold text-fg">{project.name}</span>
-            <Badge tone="info">{project.memberBotIds.length} 个成员</Badge>
+          <div className="truncate text-lg font-semibold tracking-tight text-fg transition-colors duration-fast group-hover:text-primary-strong">
+            {project.name}
           </div>
-          {project.description && <div className="mt-1 text-xs text-fg-muted">{project.description}</div>}
-          <div className="mt-1.5 flex flex-wrap items-center gap-1 text-xs text-fg-muted">
-            <span className="text-fg-subtle">成员：</span>
-            {memberNames.length === 0 ? (
-              <span className="text-fg-subtle">（暂无，至少加 2 个才能互相 @）</span>
-            ) : (
-              memberNames.map((n) => (
-                <Badge key={n} tone="neutral">
-                  {n}
-                </Badge>
-              ))
-            )}
-          </div>
-          <div className="mt-1 text-xs text-fg-subtle">
-            协作预算：最多 <code className="rounded bg-bg-subtle px-1">{project.maxTurnsPerTask}</code> 跳 · 成本上限{' '}
-            <code className="rounded bg-bg-subtle px-1">{project.maxCostUsd === 0 ? '不限' : `$${project.maxCostUsd}`}</code>
-          </div>
+          {project.description ? (
+            <p className="mt-1 line-clamp-2 text-sm leading-relaxed text-fg-muted">{project.description}</p>
+          ) : (
+            <p className="mt-1 text-sm text-fg-subtle">未填写描述</p>
+          )}
         </div>
-        <div className="flex flex-shrink-0 gap-2">
-          <Button size="sm" variant="secondary" onClick={onEdit}>
-            编辑
-          </Button>
-          <Button size="sm" variant="danger" onClick={onDelete}>
-            删除
-          </Button>
-        </div>
+        <ArrowUpRight
+          aria-hidden
+          className="mt-1 size-4 shrink-0 text-fg-subtle opacity-0 transition duration-fast group-hover:translate-x-0.5 group-hover:text-primary group-hover:opacity-100"
+        />
       </div>
-    </Card>
+
+      {/* 底部行：成员头像组（左）+ 协作预算徽标（右） */}
+      <div className="mt-auto flex items-center justify-between gap-3 pt-1">
+        <div className="min-w-0 flex-1">
+          <AvatarStack members={members} size={28} />
+        </div>
+        <Badge tone="neutral" className="shrink-0 gap-1 tabular-nums">
+          <Coins className="size-3" aria-hidden />
+          {maxCost > 0 ? `≤$${maxCost} · ${maxTurns}跳` : `≤${maxTurns}跳`}
+        </Badge>
+      </div>
+    </Link>
   );
 }
 
-function ProjectFormModal({
+function NewProjectModal({
   open,
-  mode,
-  existing,
   bots,
   projects,
   onClose,
-  onDone,
 }: {
   open: boolean;
-  mode: 'create' | 'edit';
-  existing?: ProjectWithMembers;
   bots: BotWithRuntime[];
   projects: ProjectWithMembers[];
   onClose: () => void;
-  onDone: () => void;
 }) {
-  const isEdit = mode === 'edit';
+  const router = useRouter();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [maxTurns, setMaxTurns] = useState(6);
-  const [maxCost, setMaxCost] = useState(2);
-  const [wsDirs, setWsDirs] = useState('');
   const [members, setMembers] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -201,21 +158,17 @@ function ProjectFormModal({
 
   useEffect(() => {
     if (!open) return;
-    setName(existing?.name ?? '');
-    setDescription(existing?.description ?? '');
-    setMaxTurns(existing?.maxTurnsPerTask ?? 6);
-    setMaxCost(existing?.maxCostUsd ?? 2);
-    setWsDirs((existing?.workspaceDirs ?? []).join('\n'));
-    setMembers(existing?.memberBotIds ?? []);
+    setName('');
+    setDescription('');
+    setMembers([]);
     setErr(null);
     setSubmitting(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, existing?.id]);
+  }, [open]);
 
-  // 每个 bot 当前所属项目名（用于提示「勾选会把它从原项目移过来」——一个 bot 只属一个项目）
+  // 每个 bot 当前所属项目名（提示「勾选会把它从原项目移过来」）
   const projectNameOf = (botId: string): string | null => {
     const b = bots.find((x) => x.id === botId);
-    if (!b?.projectId || b.projectId === existing?.id) return null;
+    if (!b?.projectId) return null;
     return projects.find((p) => p.id === b.projectId)?.name ?? '其他项目';
   };
 
@@ -223,32 +176,11 @@ function ProjectFormModal({
     setSubmitting(true);
     setErr(null);
     try {
-      const workspaceDirs = wsDirs.split('\n').map((s) => s.trim()).filter(Boolean);
-      if (isEdit && existing) {
-        const patch: ProjectUpdate = {
-          name,
-          description,
-          maxTurnsPerTask: maxTurns,
-          maxCostUsd: maxCost,
-          workspaceDirs,
-          memberBotIds: members,
-        };
-        await projectsApi.update(existing.id, patch);
-      } else {
-        const input: ProjectCreate = {
-          name,
-          description,
-          maxTurnsPerTask: maxTurns,
-          maxCostUsd: maxCost,
-          workspaceDirs,
-          memberBotIds: members,
-        };
-        await projectsApi.create(input);
-      }
-      onDone();
+      const created = await projectsApi.create(buildProjectCreate({ ...emptyProjectFormState(), name, description, members }));
+      // 弹窗刻意省略预算/工作目录——建完直接进配置页接着配
+      router.push(`/projects/${created.id}`);
     } catch (e) {
       setErr((e as Error).message);
-    } finally {
       setSubmitting(false);
     }
   };
@@ -257,7 +189,7 @@ function ProjectFormModal({
     <FormModal
       open={open}
       onClose={onClose}
-      title={isEdit && existing ? `编辑项目「${existing.name}」` : '新建项目'}
+      title="新建项目"
       size="md"
       onSubmit={onSubmit}
       submitting={submitting}
@@ -268,50 +200,18 @@ function ProjectFormModal({
         <Input ref={nameRef} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：产品研发组" required />
       </Field>
       <Field label="描述（可选）">
-        <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="这个项目是干什么的" />
+        <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="这个项目是干什么的" maxLength={500} />
       </Field>
-      <div className="flex gap-3">
-        <Field label="单任务最大转交跳数" className="w-40">
-          <Input type="number" min={1} max={20} value={maxTurns} onChange={(e) => setMaxTurns(Number(e.target.value))} />
-        </Field>
-        <Field label="单任务成本上限（$，0=不限）" className="w-48">
-          <Input type="number" min={0} max={100} step={0.5} value={maxCost} onChange={(e) => setMaxCost(Number(e.target.value))} />
-        </Field>
-      </div>
-      <Field label="项目工作目录（每行一个；本项目全体成员可见。成员实际可访问 = 这份 + 它自己在「Bots」里配的）">
-        <Textarea
-          value={wsDirs}
-          onChange={(e) => setWsDirs(e.target.value)}
-          rows={3}
-          className="font-mono"
-          placeholder={'E:\\UEProjects\\ProjectA\nD:\\notes\\ProjectA'}
+      <Field label="成员 bot（勾选加入本项目；同项目成员可互相 @。预算、工作目录建完进配置页配）">
+        <MemberPicker
+          bots={bots}
+          selected={members}
+          onToggle={(id, checked) =>
+            setMembers((prev) => (checked ? [...new Set([...prev, id])] : prev.filter((x) => x !== id)))
+          }
+          otherProjectOf={projectNameOf}
+          maxHeightClass="max-h-52"
         />
-      </Field>
-      <Field label="成员 bot（勾选加入本项目；同项目成员可互相 @）">
-        {bots.length === 0 ? (
-          <div className="text-[11px] text-fg-subtle">还没有 bot——先去「Bots」创建几个再来编组。</div>
-        ) : (
-          <div className="max-h-52 space-y-1 overflow-y-auto rounded border border-border bg-bg p-2">
-            {bots.map((b) => {
-              const otherProject = projectNameOf(b.id);
-              return (
-                <label key={b.id} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="accent-primary-strong"
-                    checked={members.includes(b.id)}
-                    onChange={(e) =>
-                      setMembers((prev) => (e.target.checked ? [...new Set([...prev, b.id])] : prev.filter((x) => x !== b.id)))
-                    }
-                  />
-                  <span className="text-fg">{b.name}</span>
-                  <code className="text-[10px] text-fg-subtle">{b.id.slice(0, 8)}</code>
-                  {otherProject && <span className="text-[10px] text-warning-fg">（在「{otherProject}」，勾选将移过来）</span>}
-                </label>
-              );
-            })}
-          </div>
-        )}
       </Field>
     </FormModal>
   );

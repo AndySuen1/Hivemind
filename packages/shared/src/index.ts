@@ -204,6 +204,10 @@ export const botSchema = z.object({
   skills: z.array(z.string()).default([]),
   // 该 bot 的定时任务。改了要重启实例（调度器在 start 时按快照注册 cron）。
   schedule: z.array(scheduleItemSchema).default([]),
+  // 头像：客户端把上传图缩到 ~128px 方形后存为 base64 data URL（data:image/...;base64,...）。
+  // 纯 dashboard 展示——不影响 Discord 身份 / system prompt / 工具 / 运行时，改了无需重启实例。
+  // 空串 = 无头像（前端回退到名字首字 initials）。max 仅作滥用上限（合法 128px 头像仅几 KB），真正体积控制在客户端缩放。
+  avatar: z.string().max(2_000_000).default(''),
   enabled: z.boolean().default(false),
   createdAt: z.number().int(),
   updatedAt: z.number().int(),
@@ -212,7 +216,7 @@ export type Bot = z.infer<typeof botSchema>;
 
 export const botCreateSchema = botSchema
   .omit({ id: true, createdAt: true, updatedAt: true })
-  .partial({ systemPrompt: true, role: true, temperature: true, tools: true, allowedRequesters: true, skills: true, schedule: true, enabled: true })
+  .partial({ systemPrompt: true, role: true, temperature: true, tools: true, allowedRequesters: true, skills: true, schedule: true, avatar: true, enabled: true })
   .extend({
     discordToken: z.string().min(1, 'Discord token 必填'),
   });
@@ -454,6 +458,53 @@ export interface LiveOverview {
   ts: number;
   bots: LiveOverviewBot[];
 }
+
+// ============================================================
+// 日志系统（Logs）数据契约
+// ------------------------------------------------------------
+// 与 observability（结构化业务事件）正交的「原始运行日志」采集通道：orchestrator 自身 +
+// launcher 转发的 dashboard/orchestrator 子进程 + launcher 自身的 stdout/stderr 行。
+// log-collector.ts 落库（logs 表，migration 0012）并经 EventEmitter 广播（SSE /api/logs/stream）。
+// message 已脱敏（redactText）+ 截断；与 observability 共用 camelCase 面向前端约定。
+// ============================================================
+
+// 日志级别：由 log-collector 的 inferLevel 从字节流/pino JSON 推断。
+export const logLevelSchema = z.enum(['debug', 'info', 'warn', 'error']);
+export type LogLevel = z.infer<typeof logLevelSchema>;
+
+// 日志来源进程：orchestrator 自捕获 / launcher 转发的 dashboard 子进程 / launcher 自身。
+export const logSourceSchema = z.enum(['orchestrator', 'dashboard', 'launcher']);
+export type LogSource = z.infer<typeof logSourceSchema>;
+
+// 一条日志行。message 已脱敏 + 截断；按 (ts, id) 倒序翻页（seq 为全局单调，便于稳定排序/去重）。
+export interface LogEntry {
+  id: string;
+  seq: number;        // 全局单调自增（同进程内）；ingest 转发的会重分配本地 seq
+  ts: number;         // 毫秒时间戳
+  source: LogSource;
+  level: LogLevel;
+  tag?: string;       // 从行首 `[bot:Name]`/`[boot]`/`[pm]` 等前缀解析，可空
+  message: string;
+}
+
+// launcher → orchestrator 的批量转发载荷（POST /api/logs/ingest）。launcher 只切行 + 标来源/流向，
+// **level/tag 由 orchestrator 端统一 parseLine 推断**（单一事实源，保证与自捕获一致以便去重）。
+// ts 由来源进程采集时刻打。
+export const logIngestEntrySchema = z.object({
+  source: logSourceSchema,
+  message: z.string(),
+  ts: z.number(),
+  stream: z.enum(['out', 'err']).optional(), // 用于 level 推断；缺省视为 out
+});
+export const logIngestPayloadSchema = z.object({
+  entries: z.array(logIngestEntrySchema).max(1000),
+});
+export type LogIngestEntry = z.infer<typeof logIngestEntrySchema>;
+export type LogIngestPayload = z.infer<typeof logIngestPayloadSchema>;
+
+// 日志游标分页：复合游标 (ts, id) 倒序，防同毫秒漏返（同 ObservCursor 思路）。
+export type LogCursor = ObservCursor;
+export type LogPage = ObservPage<LogEntry, LogCursor>;
 
 // ============================================================
 // Skill / Schedule API 响应（Phase 3.5）

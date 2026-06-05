@@ -3,7 +3,7 @@ import { cn } from '@/lib/utils';
 import { Spinner } from './spinner';
 
 type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost';
-type ButtonSize = 'sm' | 'md';
+type ButtonSize = 'sm' | 'md' | 'lg';
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
@@ -23,6 +23,7 @@ const VARIANT: Record<ButtonVariant, string> = {
 const SIZE: Record<ButtonSize, string> = {
   sm: 'h-7 gap-1 px-2.5 text-xs',
   md: 'h-9 gap-1.5 px-3.5 text-sm',
+  lg: 'h-10 gap-2 px-4 text-[15px]',
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
@@ -35,7 +36,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       type={type ?? 'button'}
       disabled={disabled || loading}
       className={cn(
-        'inline-flex items-center justify-center rounded font-medium transition duration-fast ease-notion',
+        'inline-flex items-center justify-center rounded-lg font-medium transition duration-fast ease-notion',
         'active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-ring/40',
         'disabled:pointer-events-none disabled:opacity-50',
         VARIANT[variant],
