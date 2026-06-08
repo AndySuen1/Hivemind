@@ -9,6 +9,7 @@ import { buildWebSearchTool } from './web-search.js';
 import { buildDelegateTool } from './delegate.js';
 import { buildMentionBotTool } from './mention-bot.js';
 import { buildDiscordPushTool } from './discord-push.js';
+import { buildOpenThreadTool, type OpenThreadFn } from './open-thread.js';
 import { composeSkillsPrompt, getEnabledSkillDirs } from '../skills.js';
 import type { DeliverMentionFn } from '../inter-agent/types.js';
 import { mergeWorkspaceDirs, formatTeamRoster } from '../inter-agent/team.js';
@@ -38,13 +39,15 @@ export interface BotToolRuntime {
   memoryDir: string | null;
   /** 启动时即可确定的 system prompt 补充（不含每条消息都会变的记忆索引） */
   staticPromptSuffix: string;
+  /** 解析后的工作目录白名单（项目共享 ∪ skill ∪ bot 自己）。fs/bash/委派/帖直通的 cwd 边界。 */
+  workspaceDirs: string[];
 }
 
 /**
  * 按 bot.tools 配置组装工具集 + 静态提示词补充。
  * deliverMention 由 BotManager 注入，供 mention_bot 工具到达其它 bot 实例做跨 bot 转交；缺省则不装 mention_bot。
  */
-export function buildBotToolRuntime(bot: Bot, deliverMention?: DeliverMentionFn): BotToolRuntime {
+export function buildBotToolRuntime(bot: Bot, deliverMention?: DeliverMentionFn, openThread?: OpenThreadFn): BotToolRuntime {
   const tools: ToolSet = {};
   const suffixParts: string[] = [];
 
@@ -148,6 +151,17 @@ export function buildBotToolRuntime(bot: Bot, deliverMention?: DeliverMentionFn)
     );
   }
 
+  // Claude 帖直通的「建帖入口工具」（口语化）：启用且配了论坛频道才装。建帖之后帖内对话仍直通（不经主脑）。
+  if (bot.tools.claudeThread.enabled && bot.tools.claudeThread.forumChannelId.trim() && openThread) {
+    Object.assign(tools, buildOpenThreadTool(openThread));
+    suffixParts.push(
+      '当用户想「开一个独立的 Claude Code 编码会话」（在某工作目录动手写/改/调代码、并要一个专属论坛帖来持续追问）时，' +
+        '用 open_claude_thread 开帖：它会建帖 + 绑定一个本地 Claude session + 把首个任务交给帖内的 Claude，用户随后在帖子里自己继续。' +
+        '口语很多样（「开个 claude」「在主工作区开 claude 帮我…」「起个帖子让 claude 做…」都算）。' +
+        '与 delegate_to_claude 区分：要一个能持续对话的专属帖用 open_claude_thread；当前频道一次性写点代码用 delegate_to_claude。普通问答/闲聊不要用。'
+    );
+  }
+
   let memoryDir: string | null = null;
   if (bot.tools.memory.enabled) {
     memoryDir = join(BOT_MEMORY_ROOT, bot.id);
@@ -160,7 +174,7 @@ export function buildBotToolRuntime(bot: Bot, deliverMention?: DeliverMentionFn)
   const skillsPrompt = composeSkillsPrompt(bot.skills);
   if (skillsPrompt) suffixParts.push(skillsPrompt);
 
-  return { tools, memoryDir, staticPromptSuffix: suffixParts.join('\n\n') };
+  return { tools, memoryDir, staticPromptSuffix: suffixParts.join('\n\n'), workspaceDirs };
 }
 
 /** composeSystemPrompt 的可选注入项：L2 本会话摘要 / L4 检索到的相关历史片段。 */

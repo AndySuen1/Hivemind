@@ -1,10 +1,35 @@
-import { Client, GatewayIntentBits, Partials, type Message, type SendableChannels } from 'discord.js';
+import {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  ChannelType,
+  PermissionFlagsBits,
+  type Message,
+  type SendableChannels,
+  type ForumChannel,
+} from 'discord.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { query, type CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import type { LanguageModel, ModelMessage } from 'ai';
 import type { Bot, BotRuntimeInfo, ScheduleItem, ScheduleRunAck } from '@hivemind/shared';
 import { botRepo, providerRepo, projectRepo } from './repos.js';
 import { createLlmModel, generateAgentReply } from './llm.js';
 import { buildBotToolRuntime, composeSystemPrompt, type BotToolRuntime, type PromptExtras } from './tools/index.js';
 import type { DelegationContext } from './claude/delegation.js';
+import {
+  buildClaudeOptions,
+  pumpQuery,
+  wireAbort,
+  type ClaudeRunResult,
+  type ClaudeStreamSink,
+} from './claude/delegation-core.js';
+import { createPermissionHandler } from './claude/permission-relay.js';
+import { tryAcquireThreadSlot } from './claude/concurrency.js';
+import { ThreadStreamSink, type ThreadStreamTarget } from './claude/thread-stream-sink.js';
+import { threadSessionRepo, type ThreadSession } from './thread-session-repo.js';
+import { classifyThreadMessage } from './thread-router.js';
+import { assertRealpathAllowed, assertWriteTargetAllowed } from './tools/path-guard.js';
 import type { MentionExperimentalContext, DiscordPushContext } from './tools/mention-bot.js';
 import { scheduler } from './scheduler.js';
 import { interAgentRouter, InterAgentRouter, type CheckResult } from './inter-agent/router.js';
@@ -80,6 +105,45 @@ export function budgetHistoryByChars(msgs: ModelMessage[], maxChars: number): Mo
 
 // 合成回合（调度器/手动触发）的「发起人」：非外部用户，跳过访问控制（调度是平台配置的）。
 const SCHEDULER_REQUESTER = '__scheduler__';
+
+// Claude 帖直通的权限/反问超时（与委派同口径）。
+const THREAD_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+const THREAD_QUESTION_TIMEOUT_MS = 30 * 60 * 1000;
+// reset 时让旧 Claude 自我总结的固定 prompt（交接文档）。
+const HANDOFF_PROMPT =
+  '请把本次会话到目前为止的工作总结成一份「交接文档」，供另一个 Claude 接手继续：\n' +
+  '1) 已完成的工作；2) 当前文件/代码状态；3) 未完成的任务；4) 关键决策与踩过的坑；5) 建议的下一步。\n' +
+  '用简洁的中文 Markdown 输出，只输出文档正文，不要执行任何工具或命令。';
+
+/** 从首条 prompt 解析可选「项目」前缀：首个词若匹配某 workspaceDir 的目录名，用它作 cwd 并从 prompt 剥离。 */
+function pickThreadCwd(prompt: string, dirs: string[]): { cwd: string; prompt: string } {
+  const trimmed = prompt.trimStart();
+  const firstTok = trimmed.split(/\s+/)[0] ?? '';
+  if (firstTok) {
+    const lower = firstTok.toLowerCase();
+    for (const d of dirs) {
+      const base = d.replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.toLowerCase() ?? '';
+      if (base && base === lower) return { cwd: d, prompt: trimmed.slice(firstTok.length).trim() };
+    }
+  }
+  return { cwd: dirs[0]!, prompt };
+}
+
+/**
+ * 主脑工具 workdir 参数 → 具体 cwd：匹配某 workspaceDir 的目录名 → 那个；看起来像路径 → 原样（交 path-guard 校验）；
+ * 否则（含空/「主工作区」这类口语）→ 第一个工作目录。最终都会过 assertRealpathAllowed。
+ */
+function resolveWorkdirHint(hint: string | undefined, dirs: string[]): string {
+  const h = (hint ?? '').trim();
+  if (!h) return dirs[0]!;
+  const lower = h.toLowerCase();
+  for (const d of dirs) {
+    const base = d.replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.toLowerCase() ?? '';
+    if (base && base === lower) return d;
+  }
+  if (/[\\/]/.test(h) || /^[a-zA-Z]:/.test(h)) return h; // 像绝对/相对路径 → 交白名单校验
+  return dirs[0]!;
+}
 
 /** runSyntheticTurn 的结果（与 shared ScheduleRunAck 对齐，缺 botId 由 manager 补）。 */
 type SyntheticTurnResult = Omit<ScheduleRunAck, 'botId'>;
@@ -166,8 +230,12 @@ class BotInstance {
       if (!provider) throw new Error(`Provider ${this.bot.providerId} 不存在`);
 
       this.model = await createLlmModel(provider, provider.model);
-      // 注入跨 bot 转交函数（mention_bot 工具用）：绑到全局 manager，能够到达其它 bot 实例。
-      this.toolRuntime = buildBotToolRuntime(this.bot, (ctx, args) => botManager.deliverMention(ctx, args));
+      // 注入跨 bot 转交（mention_bot）+ 开 Claude 帖（open_claude_thread）回调：都绑到全局 manager。
+      this.toolRuntime = buildBotToolRuntime(
+        this.bot,
+        (ctx, args) => botManager.deliverMention(ctx, args),
+        (ctx, args) => botManager.openClaudeThread(ctx, args)
+      );
       const toolNames = Object.keys(this.toolRuntime.tools);
       if (toolNames.length) console.log(`[bot:${this.bot.name}] 工具：${toolNames.join(', ')}`);
 
@@ -261,6 +329,12 @@ class BotInstance {
     const me = this.client.user;
     // 忽略自己发的消息（含自己发出的 @ 转交；否则 A 会处理自己刚发的转交消息）
     if (me && msg.author.id === me.id) return;
+
+    // Claude 帖直通分流（仅人类消息）：绑定帖内消息 → 直接喂给该帖的 Claude session（跳过 DeepSeek）；
+    // @bot + 触发词 → 在论坛频道建帖。命中即在此收口，不落入下面的 DeepSeek 流。
+    if (!msg.author.bot && this.bot.tools.claudeThread.enabled) {
+      if (await this.maybeHandleThread(msg)) return;
+    }
 
     // 本回合的协作链上下文：人类回合 = undefined（首次调 mention_bot 才惰性开链）；接力回合 = { taskId }。
     let relayChain: MentionChainContext | undefined;
@@ -894,6 +968,464 @@ class BotInstance {
     }
   }
 
+  // ============================================================
+  // Claude 帖直通（论坛帖子 ↔ 本地 Claude Code session）
+  // ============================================================
+
+  /**
+   * 分流：判定这条人类消息是不是「Claude 帖」相关（建帖 / 帖内直通 / 帖内重开），是则在此处理并返回 true
+   * （handleMessage 据此收口、不落入 DeepSeek 流）；否则返回 false 走原流程。
+   */
+  private async maybeHandleThread(msg: Message): Promise<boolean> {
+    const cfg = this.bot.tools.claudeThread;
+    const me = this.client.user;
+    const isThread = msg.channel.isThread();
+    const isMentioned = me ? msg.mentions.has(me) : false;
+    const content = resolveMentionsReadable(msg.content, me?.id, (id) => botManager.resolveBotName(id));
+    const binding = isThread ? threadSessionRepo.getByThread(this.bot.id, msg.channel.id) : null;
+    const boundActive = !!binding && binding.status === 'active';
+
+    const fork = classifyThreadMessage({
+      enabled: cfg.enabled,
+      forumChannelId: cfg.forumChannelId,
+      triggerKeyword: cfg.triggerKeyword,
+      resetKeywords: cfg.resetKeywords,
+      isThread,
+      isMentioned,
+      content,
+      boundActive,
+    });
+    if (fork.kind === 'normal') return false;
+
+    // 访问控制：帖内驱动 / 建帖都用 bot 级 allowedRequesters 白名单（与 normal 路径同口径）。
+    // 非白名单：在 Claude 帖里静默吞掉（既不喂 Claude，也不落入 DeepSeek），防公共帖被劫持。
+    if (this.bot.allowedRequesters.length > 0 && !this.bot.allowedRequesters.includes(msg.author.id)) {
+      return true;
+    }
+
+    try {
+      if (fork.kind === 'create') {
+        await this.handleThreadCreate(msg, fork.prompt);
+      } else if (fork.kind === 'passthrough' && binding) {
+        if (content.trim()) await this.streamThreadTurn(binding, content, msg.author.id, msg.channel as SendableChannels);
+      } else if (fork.kind === 'reset' && binding) {
+        await this.handleThreadReset(msg, binding, fork.instruction);
+      }
+    } catch (e) {
+      console.error(`[bot:${this.bot.name}] Claude 帖处理异常（已隔离）`, e);
+    }
+    return true;
+  }
+
+  /** 把一个 thread channel 包成渲染器的输出端（禁 @everyone/@role；大输出走附件）。 */
+  private threadTarget(thread: SendableChannels): ThreadStreamTarget {
+    return {
+      send: async (content) => {
+        await thread.send({ content, allowedMentions: { parse: [] } });
+      },
+      sendFile: async (name, content) => {
+        await thread.send({ files: [{ attachment: Buffer.from(content, 'utf8'), name }], allowedMentions: { parse: [] } });
+      },
+    };
+  }
+
+  /**
+   * 跑一个直通回合：组装 options（含 resume）→ pumpQuery 把 SDKMessage 流逐条喂给 sink → 返回收尾态。
+   * 不发收尾文案（由调用方按 aborted/timedOut/isError 决定贴什么）。canUseTool 可覆盖（reset 总结时传 deny-all）。
+   */
+  private async runClaudeTurn(args: {
+    prompt: string;
+    cwd: string;
+    resumeSessionId?: string;
+    maxTurns: number;
+    timeoutMs: number;
+    upstream: AbortSignal;
+    requesterId: string;
+    channel: SendableChannels;
+    sink: ClaudeStreamSink;
+    canUseTool?: CanUseTool;
+    obs?: { runId: string; sessionId: string };
+  }): Promise<ClaudeRunResult & { aborted: boolean; timedOut: boolean }> {
+    const abort = wireAbort(args.upstream, args.timeoutMs);
+    let capturedSession: string | undefined;
+    // 包一层捕获 sessionId（pumpQuery 抛错时也能拿到，用于 resume 失效兜底/落库）。
+    const wrapSink: ClaudeStreamSink = {
+      onInit: (sid) => {
+        capturedSession = sid;
+        return args.sink.onInit?.(sid);
+      },
+      onAssistant: (t, tu) => args.sink.onAssistant?.(t, tu),
+      onToolResult: (r) => args.sink.onToolResult?.(r),
+      onRateLimit: (i, r) => args.sink.onRateLimit?.(i, r),
+      onResult: (m) => args.sink.onResult?.(m),
+    };
+    const handler =
+      args.canUseTool ??
+      createPermissionHandler({
+        botName: this.bot.name,
+        requesterId: args.requesterId,
+        channel: args.channel,
+        signal: abort.ac.signal,
+        permissionTimeoutMs: THREAD_PERMISSION_TIMEOUT_MS,
+        questionTimeoutMs: THREAD_QUESTION_TIMEOUT_MS,
+        observe: args.obs ? { runId: args.obs.runId, sessionId: args.obs.sessionId, botId: this.bot.id } : undefined,
+      });
+    const options = buildClaudeOptions({
+      cwd: args.cwd,
+      abortController: abort.ac,
+      canUseTool: handler,
+      maxTurns: args.maxTurns,
+      resumeSessionId: args.resumeSessionId,
+      logTag: this.bot.name,
+    });
+    try {
+      const r = await pumpQuery(query({ prompt: args.prompt, options }), wrapSink, { logTag: this.bot.name });
+      abort.dispose();
+      return {
+        ...r,
+        sessionId: r.sessionId ?? capturedSession,
+        aborted: abort.ac.signal.aborted && !abort.timedOut(),
+        timedOut: abort.timedOut(),
+      };
+    } catch (e) {
+      abort.dispose();
+      if (!abort.ac.signal.aborted) console.error(`[bot:${this.bot.name}] 直通回合出错`, e);
+      return {
+        sessionId: capturedSession,
+        finalText: '',
+        isError: true,
+        numTurns: undefined,
+        costUsd: undefined,
+        rateLimited: false,
+        aborted: abort.ac.signal.aborted && !abort.timedOut(),
+        timedOut: abort.timedOut(),
+      };
+    }
+  }
+
+  /**
+   * 帖内一条用户消息 = 一个直通回合：抢全局槽 + 熔断检查 → resume 该帖 session 跑一回合并逐条贴帖 →
+   * resume 失效兜底（重试一次不带 resume）→ 刷新 session_id 落库 + 回灌全局成本 + 贴收尾文案。
+   */
+  private async streamThreadTurn(
+    binding: ThreadSession,
+    prompt: string,
+    requesterId: string,
+    thread: SendableChannels
+  ): Promise<void> {
+    if (interAgentRouter.isGloballyTripped(Date.now())) {
+      await thread.send('⚠️ 今日协作成本已达全局熔断阈值，暂停新的 Claude 回合。稍后再试。').catch(() => {});
+      return;
+    }
+    const acq = tryAcquireThreadSlot();
+    if (!acq.ok) {
+      await thread.send('⚠️ 当前并发的 Claude 直通回合已达上限，请稍后再发。').catch(() => {});
+      return;
+    }
+    const turnAc = new AbortController();
+    this.active.add(turnAc);
+
+    const cfg = this.bot.tools.claudeThread;
+    const sessionId = recorder.ensureSession({
+      botId: this.bot.id,
+      channelId: thread.id,
+      channelType: 'thread',
+      channelName: 'name' in thread && typeof thread.name === 'string' ? thread.name : undefined,
+      title: prompt.slice(0, 80),
+    });
+    const runId = recorder.startRun({ sessionId, botId: this.bot.id, requesterId });
+    recorder.recordMessage({ sessionId, runId, botId: this.bot.id, role: 'user', content: prompt, authorId: requesterId });
+    recorder.recordEvent({
+      runId,
+      sessionId,
+      botId: this.bot.id,
+      type: 'thread_session_start',
+      label: '🧵 Claude 帖回合',
+      status: 'running',
+      input: { threadId: binding.threadId, resume: !!binding.claudeSessionId, cwd: binding.cwd },
+    });
+
+    const sink = new ThreadStreamSink(this.threadTarget(thread));
+    try {
+      let res = await this.runClaudeTurn({
+        prompt,
+        cwd: binding.cwd,
+        resumeSessionId: binding.claudeSessionId,
+        maxTurns: cfg.maxTurns,
+        timeoutMs: cfg.timeoutMs,
+        upstream: turnAc.signal,
+        requesterId,
+        channel: thread,
+        sink,
+        obs: { runId, sessionId },
+      });
+
+      // resume 失效兜底：有 resume 且出错（非取消/超时）→ 多半是上次 session 不可续，新开一次。
+      if (res.isError && binding.claudeSessionId && !res.aborted && !res.timedOut) {
+        sink.notice('↻ 上次会话无法续接，正在新开会话继续…');
+        res = await this.runClaudeTurn({
+          prompt,
+          cwd: binding.cwd,
+          resumeSessionId: undefined,
+          maxTurns: cfg.maxTurns,
+          timeoutMs: cfg.timeoutMs,
+          upstream: turnAc.signal,
+          requesterId,
+          channel: thread,
+          sink,
+          obs: { runId, sessionId },
+        });
+      }
+
+      if (res.sessionId) threadSessionRepo.updateSession(binding.threadId, res.sessionId);
+      else threadSessionRepo.touch(binding.threadId);
+      interAgentRouter.recordGlobalCost(res.costUsd ?? 0, Date.now());
+
+      if (res.timedOut) sink.notice('⚠️ 本回合超时已中止。');
+      else if (res.aborted) sink.notice('⏹️ 本回合已取消。');
+      else if (res.isError) sink.notice(`⚠️ 本回合未成功完成${res.finalText ? '：' + res.finalText.slice(0, 200) : '。'}`);
+      await sink.flush();
+
+      recorder.recordMessage({ sessionId, runId, botId: this.bot.id, role: 'assistant', content: res.finalText || '（无文本输出）' });
+      recorder.endRun(runId, { status: res.aborted ? 'aborted' : res.isError ? 'error' : 'ok', toolCallCount: res.numTurns ?? 0 });
+    } catch (e) {
+      await sink.flush().catch(() => {});
+      recorder.endRun(runId, { status: 'error', error: (e as Error).message });
+      await thread.send(`❌ 出错：${(e as Error).message}`).catch(() => {});
+    } finally {
+      this.active.delete(turnAc);
+      acq.slot.release();
+    }
+  }
+
+  /** @bot + 触发词（快捷路径）：解析 cwd（首词可指定项目）后建帖、起首轮。 */
+  private async handleThreadCreate(msg: Message, prompt: string): Promise<void> {
+    const dirs = (this.toolRuntime?.workspaceDirs ?? []).filter((d) => d.trim());
+    if (!dirs.length) {
+      await msg.reply('❌ 未配置任何工作目录白名单，无法新建 Claude 帖（请在工具配置里填写工作目录）。').catch(() => {});
+      return;
+    }
+    const picked = pickThreadCwd(prompt, dirs);
+    const res = await this.createThreadSession({ cwd: picked.cwd, task: picked.prompt, requesterId: msg.author.id });
+    await msg
+      .reply({ content: res.ok ? `✅ ${res.message}` : `❌ ${res.message.replace(/^错误：/, '')}`, allowedMentions: { parse: [] } })
+      .catch(() => {});
+  }
+
+  /**
+   * 主脑工具 open_claude_thread 的落地（口语化入口）：校验 → 解析 workdir → 建帖 + 起首轮 → 返回给主脑转告。
+   * 与关键词快捷路径共用 createThreadSession。
+   */
+  async openClaudeThreadFromTool(ctx: DelegationContext, args: { task: string; workdir?: string }): Promise<{ ok: boolean; message: string }> {
+    const cfg = this.bot.tools.claudeThread;
+    if (!cfg.enabled || !cfg.forumChannelId.trim()) {
+      return { ok: false, message: '错误：本 bot 未启用 Claude 帖直通或未配置论坛频道，无法开帖。' };
+    }
+    const dirs = (this.toolRuntime?.workspaceDirs ?? []).filter((d) => d.trim());
+    if (!dirs.length) return { ok: false, message: '错误：未配置任何工作目录白名单，无法开 Claude 帖。' };
+    const cwd = resolveWorkdirHint(args.workdir, dirs);
+    const res = await this.createThreadSession({ cwd, task: (args.task ?? '').trim(), requesterId: ctx.requesterId });
+    if (!res.ok) return res;
+    return { ok: true, message: `${res.message}（已在帖子里开始处理，你可以去帖子继续，无需在这里等待。）` };
+  }
+
+  /**
+   * 建帖核心（关键词快捷路径与主脑工具共用）：校验 cwd/论坛频道/权限/tag → threads.create → 绑定落库 →
+   * 有首条任务则在该帖队列 fire 首轮。不自己回链，返回结果串供调用方决定怎么回。
+   */
+  private async createThreadSession(args: { cwd: string; task: string; requesterId: string }): Promise<{ ok: boolean; threadId?: string; message: string }> {
+    const cfg = this.bot.tools.claudeThread;
+    const dirs = (this.toolRuntime?.workspaceDirs ?? []).filter((d) => d.trim());
+    let safeCwd: string;
+    try {
+      safeCwd = assertRealpathAllowed(args.cwd, dirs);
+    } catch (e) {
+      return { ok: false, message: `错误：${(e as Error).message}` };
+    }
+
+    const forum = await this.client.channels.fetch(cfg.forumChannelId).catch(() => null);
+    if (!forum || forum.type !== ChannelType.GuildForum) {
+      return { ok: false, message: '错误：配置的论坛频道无效或不是「论坛(Forum)」类型频道。' };
+    }
+    const forumCh = forum as ForumChannel;
+
+    // 建帖前置权限校验（best-effort）。
+    const me = this.client.user;
+    if (me) {
+      const perms = forumCh.permissionsFor(me.id);
+      const need = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.CreatePublicThreads, PermissionFlagsBits.SendMessagesInThreads];
+      if (perms && !need.every((p) => perms.has(p))) {
+        return { ok: false, message: '错误：我在该论坛频道缺少建帖权限（需要：查看频道 / 创建公开帖 / 在帖中发言）。' };
+      }
+    }
+
+    // forum 频道若设了 RequireTag，建帖必须带至少一个 tag，否则 API 报错——自动套用第一个可用 tag。
+    let appliedTags: string[] = [];
+    try {
+      if ((forumCh.flags?.has('RequireTag') ?? false) && forumCh.availableTags.length) appliedTags = [forumCh.availableTags[0]!.id];
+    } catch {
+      appliedTags = [];
+    }
+
+    const title = (args.task || `Claude · ${this.bot.name}`).slice(0, 90);
+    let thread: SendableChannels;
+    try {
+      const created = await forumCh.threads.create({
+        name: title,
+        message: {
+          content:
+            `🤖 已为「${this.bot.name}」创建 Claude Code 帖。工作目录：\`${safeCwd}\`。\n` +
+            `直接在本帖发消息即可与 Claude 对话（无需 @）；发「${cfg.resetKeywords[0] ?? '/reset'}」可重开会话。`,
+        },
+        ...(appliedTags.length ? { appliedTags } : {}),
+        autoArchiveDuration: 10080,
+      });
+      thread = created as unknown as SendableChannels;
+    } catch (e) {
+      return { ok: false, message: `错误：建帖失败：${(e as Error).message}` };
+    }
+
+    const binding = threadSessionRepo.create({
+      threadId: thread.id,
+      botId: this.bot.id,
+      forumChannelId: cfg.forumChannelId,
+      cwd: safeCwd,
+      requesterId: args.requesterId,
+      title,
+    });
+
+    // 首条任务：在该帖的串行队列里跑首个直通回合，不阻塞发起处。
+    const first = args.task.trim();
+    if (first) void this.enqueueOnChannel(thread.id, () => this.streamThreadTurn(binding, first, args.requesterId, thread));
+    return { ok: true, threadId: thread.id, message: `已开 Claude 帖 👉 <#${thread.id}>` };
+  }
+
+  /**
+   * 帖内「重开 session」：让旧 Claude 自我总结成交接文档（写进工作目录）→ 以「续接开场白」起一个新 session，
+   * 仍在同一帖子；记 reset 链。旧 session 不可续时降级为极简交接，绝不阻断重开。
+   */
+  private async handleThreadReset(msg: Message, binding: ThreadSession, instruction: string): Promise<void> {
+    const cfg = this.bot.tools.claudeThread;
+    const thread = msg.channel as SendableChannels;
+    if (interAgentRouter.isGloballyTripped(Date.now())) {
+      await thread.send('⚠️ 今日协作成本已达熔断阈值，暂不重开会话。').catch(() => {});
+      return;
+    }
+    const acq = tryAcquireThreadSlot();
+    if (!acq.ok) {
+      await thread.send('⚠️ 当前并发已达上限，请稍后再重开。').catch(() => {});
+      return;
+    }
+    const turnAc = new AbortController();
+    this.active.add(turnAc);
+
+    const sink = new ThreadStreamSink(this.threadTarget(thread));
+    const sessionId = recorder.ensureSession({
+      botId: this.bot.id,
+      channelId: thread.id,
+      channelType: 'thread',
+      channelName: 'name' in thread && typeof thread.name === 'string' ? thread.name : undefined,
+      title: `[重开] ${instruction.slice(0, 60)}`,
+    });
+    const runId = recorder.startRun({ sessionId, botId: this.bot.id, requesterId: msg.author.id });
+    try {
+      sink.notice('🔄 正在归档上一段会话…');
+      await sink.flush();
+
+      // 1) 让旧 Claude 自我总结（deny 所有工具，只要文本）。安静渲染（不刷屏）。
+      let handoff = '';
+      if (binding.claudeSessionId) {
+        const denyAll: CanUseTool = async () => ({ behavior: 'deny', message: '仅需文字总结，无需工具', interrupt: false });
+        const quietSink = new ThreadStreamSink(this.threadTarget(thread), { quiet: true });
+        const sum = await this.runClaudeTurn({
+          prompt: HANDOFF_PROMPT,
+          cwd: binding.cwd,
+          resumeSessionId: binding.claudeSessionId,
+          maxTurns: 4,
+          timeoutMs: 5 * 60 * 1000,
+          upstream: turnAc.signal,
+          requesterId: msg.author.id,
+          channel: thread,
+          sink: quietSink,
+          canUseTool: denyAll,
+        });
+        handoff = sum.finalText.trim();
+      }
+      if (!handoff) handoff = `（无法从上一段会话自动总结。）\n用户的续接说明：${instruction || '（无）'}`;
+
+      // 2) 交接文档落盘（在 cwd 内，过 path-guard）。失败不阻断。
+      let docPath: string | undefined;
+      try {
+        docPath = this.writeHandoffDoc(binding, handoff);
+      } catch (e) {
+        console.error(`[bot:${this.bot.name}] 写交接文档失败（已忽略）`, e);
+      }
+
+      // 3) 开场白：交接文档作为新 session 的首个上下文。
+      const openingLine =
+        '你在续接一个已重置的会话（同一个论坛帖子，但这是一个全新的 Claude session）。\n' +
+        (docPath
+          ? `上一段会话的交接文档见 \`${docPath}\`（请先读取它了解上下文）。\n`
+          : `上一段会话的交接如下：\n\n${handoff}\n\n`) +
+        `续接目标：${instruction || '继续之前的工作。'}`;
+
+      // 4) 起新 session（不带 resume）跑开场白，逐条贴帖。
+      const newRes = await this.runClaudeTurn({
+        prompt: openingLine,
+        cwd: binding.cwd,
+        resumeSessionId: undefined,
+        maxTurns: cfg.maxTurns,
+        timeoutMs: cfg.timeoutMs,
+        upstream: turnAc.signal,
+        requesterId: msg.author.id,
+        channel: thread,
+        sink,
+        obs: { runId, sessionId },
+      });
+      await sink.flush();
+
+      threadSessionRepo.recordReset({
+        threadId: binding.threadId,
+        oldSession: binding.claudeSessionId,
+        newSession: newRes.sessionId,
+        handoffDoc: docPath,
+        openingLine,
+      });
+      interAgentRouter.recordGlobalCost(newRes.costUsd ?? 0, Date.now());
+      recorder.recordEvent({
+        runId,
+        sessionId,
+        botId: this.bot.id,
+        type: 'thread_reset',
+        label: '🔄 重开会话',
+        status: newRes.isError ? 'error' : 'ok',
+        input: { threadId: binding.threadId, oldSession: binding.claudeSessionId, newSession: newRes.sessionId, handoffDoc: docPath },
+      });
+
+      sink.notice(`🔄 已重开会话（第 ${binding.resetCount + 1} 次），上一段已总结交接。`);
+      await sink.flush();
+      recorder.recordMessage({ sessionId, runId, botId: this.bot.id, role: 'assistant', content: newRes.finalText || '（已重开会话）' });
+      recorder.endRun(runId, { status: newRes.isError ? 'error' : 'ok', toolCallCount: newRes.numTurns ?? 0 });
+    } catch (e) {
+      await sink.flush().catch(() => {});
+      recorder.endRun(runId, { status: 'error', error: (e as Error).message });
+      await thread.send(`❌ 重开失败：${(e as Error).message}`).catch(() => {});
+    } finally {
+      this.active.delete(turnAc);
+      acq.slot.release();
+    }
+  }
+
+  /** 把交接文档写到 `<cwd>/.hivemind-threads/<threadId>/gen-<N>-carryover.md`（过 path-guard，在白名单内）。 */
+  private writeHandoffDoc(binding: ThreadSession, content: string): string {
+    const dir = join(binding.cwd, '.hivemind-threads', binding.threadId);
+    const file = join(dir, `gen-${binding.resetCount + 1}-carryover.md`);
+    assertWriteTargetAllowed(file, this.toolRuntime?.workspaceDirs ?? []);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, content, 'utf8');
+    return file;
+  }
+
   /** 把一个任务挂到某频道的串行队列尾（与该频道普通消息串行），返回任务结果。链尾异常不破坏队列。 */
   private enqueueOnChannel<T>(chanId: string, task: () => Promise<T>): Promise<T> {
     const prev = this.channelQueues.get(chanId) ?? Promise.resolve();
@@ -1022,6 +1554,18 @@ class BotManager {
    * 全程不抛：所有失败/暂停都转成给调用方模型看的字符串（仿 delegate 的「错误：」约定）。护栏与开链逻辑由
    * authorizeAndCommitHop 承载（与「正文内联 @」共用）；本方法只负责工具路径的「发独立 @ 消息」。
    */
+  /** open_claude_thread 工具回调：路由到发起 bot 实例去建帖 + 起首轮。返回给主脑转告的结果串。 */
+  async openClaudeThread(ctx: DelegationContext, args: { task: string; workdir?: string }): Promise<{ ok: boolean; message: string }> {
+    const inst = this.instances.get(ctx.botId);
+    if (!inst) return { ok: false, message: '错误：发起 bot 已下线，无法开 Claude 帖。' };
+    try {
+      return await inst.openClaudeThreadFromTool(ctx, args);
+    } catch (e) {
+      console.error('[manager] openClaudeThread 异常（已隔离）', e);
+      return { ok: false, message: '错误：开 Claude 帖时发生内部错误，请稍后重试。' };
+    }
+  }
+
   async deliverMention(fromCtx: DelegationContext, args: DeliverMentionArgs): Promise<DeliverMentionResult> {
     try {
       const now = Date.now();

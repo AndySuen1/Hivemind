@@ -43,6 +43,13 @@ export interface BotFormState {
   schedule: ScheduleItem[];
   pushEnabled: boolean;
   pushChannels: string;
+  // Claude 帖直通（论坛帖子 ↔ 本地 Claude Code session）
+  threadEnabled: boolean;
+  threadForumChannelId: string;
+  threadTrigger: string;
+  threadResetKeywords: string;
+  threadMaxTurns: number;
+  threadTimeoutMin: number;
 }
 
 const DEFAULT_PROMPT = '你是一个友好、简洁的中文助手。';
@@ -77,6 +84,12 @@ export function emptyBotFormState(firstProviderId = ''): BotFormState {
     schedule: [],
     pushEnabled: false,
     pushChannels: '',
+    threadEnabled: false,
+    threadForumChannelId: '',
+    threadTrigger: '新建会话',
+    threadResetKeywords: '/reset\n重开',
+    threadMaxTurns: 60,
+    threadTimeoutMin: 20,
   };
 }
 
@@ -111,6 +124,12 @@ export function botToFormState(bot: Bot, firstProviderId = ''): BotFormState {
     schedule: bot.schedule ?? [],
     pushEnabled: t.discordPush?.enabled ?? false,
     pushChannels: (t.discordPush?.channelIds ?? []).join('\n'),
+    threadEnabled: t.claudeThread?.enabled ?? false,
+    threadForumChannelId: t.claudeThread?.forumChannelId ?? '',
+    threadTrigger: t.claudeThread?.triggerKeyword ?? '新建会话',
+    threadResetKeywords: (t.claudeThread?.resetKeywords ?? ['/reset', '重开']).join('\n'),
+    threadMaxTurns: t.claudeThread?.maxTurns ?? 60,
+    threadTimeoutMin: Math.round((t.claudeThread?.timeoutMs ?? 1_200_000) / 60000),
   };
 }
 
@@ -133,6 +152,14 @@ export function buildTools(s: BotFormState): BotTools {
       timeoutMs: Math.max(1, s.claudeTimeoutMin) * 60000,
     },
     discordPush: { enabled: s.pushEnabled, channelIds: linesToArr(s.pushChannels) },
+    claudeThread: {
+      enabled: s.threadEnabled,
+      forumChannelId: s.threadForumChannelId.trim(),
+      triggerKeyword: s.threadTrigger.trim() || '新建会话',
+      resetKeywords: linesToArr(s.threadResetKeywords).length ? linesToArr(s.threadResetKeywords) : ['/reset', '重开'],
+      maxTurns: s.threadMaxTurns,
+      timeoutMs: Math.max(1, s.threadTimeoutMin) * 60000,
+    },
   };
 }
 

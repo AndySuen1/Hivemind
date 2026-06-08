@@ -48,3 +48,34 @@ export function tryAcquireDelegationSlot(botId: string): AcquireResult {
 export function delegationStats(): { globalActive: number; globalMax: number; perBotMax: number } {
   return { globalActive, globalMax: GLOBAL_MAX, perBotMax: PER_BOT_MAX };
 }
+
+// ============================================================
+// Claude 帖直通的并发预算（与上面的委派槽分离）
+// ------------------------------------------------------------
+// 直通是「帖子=终端」：一个 bot 可同时维护多个活跃帖，故**不能**套用委派的 per-bot=1（会让多帖互相阻塞）。
+// 同帖消息已由 bot-manager 的 channelQueues（key=thread.id）天然串行；这里只设**全局**上限保护机器。
+// ============================================================
+
+const GLOBAL_THREAD_SESSION_MAX = 6;
+let threadSessionActive = 0;
+
+export type ThreadSlotResult =
+  | { ok: true; slot: DelegationSlot }
+  | { ok: false; reason: 'global-busy' };
+
+/** 非阻塞抢一个直通回合槽位（仅全局上限）。抢不到 → 帖里回「系统繁忙稍后」。 */
+export function tryAcquireThreadSlot(): ThreadSlotResult {
+  if (threadSessionActive >= GLOBAL_THREAD_SESSION_MAX) return { ok: false, reason: 'global-busy' };
+  threadSessionActive++;
+  let released = false;
+  return {
+    ok: true,
+    slot: {
+      release() {
+        if (released) return;
+        released = true;
+        threadSessionActive = Math.max(0, threadSessionActive - 1);
+      },
+    },
+  };
+}

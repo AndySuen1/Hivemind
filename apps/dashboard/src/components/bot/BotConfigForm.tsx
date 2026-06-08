@@ -480,6 +480,69 @@ export function BotConfigForm({ state: s, setState, providers, projects, availab
             </div>
           )}
 
+          <ToolCard>
+            <ToolHeader
+              checked={s.threadEnabled}
+              onChange={(v) => set('threadEnabled', v)}
+              title="🧵 Claude 帖直通（论坛帖 ↔ 本地 Claude session）"
+              desc="@bot + 触发词 → 在论坛频道开帖；帖内每条消息直通一个本地 Claude Code session（跳过主脑），实时贴出对话与命令"
+            />
+            {s.threadEnabled && (
+              <div className="mt-2 space-y-2">
+                <Field label="论坛(Forum)频道 id（建帖目标；留空 = 不建帖、不接管任何帖）">
+                  <Input
+                    value={s.threadForumChannelId}
+                    onChange={(e) => set('threadForumChannelId', e.target.value)}
+                    placeholder="123456789012345678"
+                    className="font-mono text-xs"
+                  />
+                </Field>
+                <Field label="建帖触发词（@bot + 该词才建帖；普通 @bot 仍走主脑对话）" className="w-64">
+                  <Input value={s.threadTrigger} onChange={(e) => set('threadTrigger', e.target.value)} placeholder="新建会话" />
+                </Field>
+                <Field label="帖内「重开会话」关键词（每行一个；旧上下文自我总结成交接文档续接）">
+                  <Textarea
+                    value={s.threadResetKeywords}
+                    onChange={(e) => set('threadResetKeywords', e.target.value)}
+                    rows={2}
+                    className="font-mono text-xs"
+                    placeholder={'/reset\n重开'}
+                  />
+                </Field>
+                <div className="flex gap-3">
+                  <Field label="单回合最大轮数" className="w-32">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={s.threadMaxTurns}
+                      onChange={(e) => set('threadMaxTurns', Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="单回合超时（分钟）" className="w-32">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={s.threadTimeoutMin}
+                      onChange={(e) => set('threadTimeoutMin', Number(e.target.value))}
+                    />
+                  </Field>
+                </div>
+                <div className="text-[11px] text-fg-muted">
+                  帖内驱动沿用本 bot 的 <strong>访问白名单</strong>（基本设置里的 allowedRequesters）；危险命令会
+                  <strong>在帖里弹按钮</strong>等触发者批准。工作目录复用「工具配置」段的白名单（首条消息可用首个词指定子目录）。
+                  绑定持久化、orchestrator 重启后回原帖可续。
+                </div>
+              </div>
+            )}
+          </ToolCard>
+          {s.threadEnabled && !(s.fsEnabled || s.bashEnabled || s.claudeEnabled) && (
+            <div className="text-[11px] text-fg-subtle">
+              提示：记得到「工具配置」段填好工作目录白名单，Claude 帖才有干活的地方。
+            </div>
+          )}
+
           <div className="rounded border border-border bg-bg-subtle p-3 text-[11px] text-fg-muted">
             🤝 跨 bot 协作（mention_bot）现在由「项目」驱动：把本 bot 和同伴编进同一个「项目」，它们就能在频道里
             互相 @ 转交任务——在「基本设置」选所属项目，或去「项目」页统一编组。转交预算（跳数 / 成本）挂在项目上。

@@ -19,6 +19,7 @@ import {
   webSearchToolConfigSchema,
   claudeCodeToolConfigSchema,
   discordPushToolConfigSchema,
+  claudeThreadToolConfigSchema,
   scheduleItemSchema,
 } from '@hivemind/shared';
 import { getDb } from './db.js';
@@ -179,6 +180,7 @@ function parseBotTools(raw: string): Bot['tools'] {
     webSearch: section(webSearchToolConfigSchema, o.webSearch),
     claudeCode: section(claudeCodeToolConfigSchema, o.claudeCode),
     discordPush: section(discordPushToolConfigSchema, o.discordPush),
+    claudeThread: section(claudeThreadToolConfigSchema, o.claudeThread),
   };
 }
 
@@ -285,6 +287,7 @@ export const botRepo = {
           webSearch: { ...existing.tools.webSearch, ...(pt.webSearch ?? {}) },
           claudeCode: { ...existing.tools.claudeCode, ...(pt.claudeCode ?? {}) },
           discordPush: { ...existing.tools.discordPush, ...(pt.discordPush ?? {}) },
+          claudeThread: { ...existing.tools.claudeThread, ...(pt.claudeThread ?? {}) },
         }
       : existing.tools;
     const tools = botToolsSchema.parse(mergedTools);

@@ -132,6 +132,26 @@ export const discordPushToolConfigSchema = z.object({
 });
 export type DiscordPushToolConfig = z.infer<typeof discordPushToolConfigSchema>;
 
+// Claude 帖直通工具（论坛帖子 ↔ 本地 Claude Code session）：用户 @bot + triggerKeyword 在论坛频道
+// 建一个帖子，帖子 1:1 绑定一个按需 spawn 的 Claude Code session；帖里每条消息**直通**该 session
+// （跳过 DeepSeek 主脑），Claude 实时输出按「步」贴进帖子。绑定落库（thread_sessions 表）、重启 resume 续接。
+// forumChannelId 空 = fail-closed（不接管任何帖）。帖内驱动权限沿用 bot.allowedRequesters，
+// 危险命令审批走帖内按钮、只找该回合触发者。cwd 复用顶层共享 workspaceDirs。
+export const claudeThreadToolConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  // 建帖目标论坛频道 id（ChannelType.GuildForum）。空 = 未配置，不建帖也不接管。
+  forumChannelId: z.string().default(''),
+  // 触发建帖的关键词：@bot + 该词（+可选项目名/首条指令）才建帖；普通 @bot 仍走 DeepSeek。
+  triggerKeyword: z.string().default('新建会话'),
+  // 帖内「重开 session」命令：旧上下文自我总结成交接文档 → 作新 session 开场白，仍在同帖。
+  resetKeywords: z.array(z.string()).default(['/reset', '重开']),
+  // 单次直通回合的最大 agent 轮数（会话型，比委派略高）
+  maxTurns: z.number().int().positive().max(200).default(60),
+  // 单次直通回合的挂钟超时（ms）
+  timeoutMs: z.number().int().positive().max(3_600_000).default(20 * 60 * 1000),
+});
+export type ClaudeThreadToolConfig = z.infer<typeof claudeThreadToolConfigSchema>;
+
 // 注：Phase 3「Inter-Agent 协作（mention_bot）」不再是 per-bot 工具配置——改由「项目」分组驱动：
 // 同一项目（bot.projectId 相同）的 bot 自动可互相 @，转交预算挂在项目上（见 projectSchema 与 inter-agent/）。
 
@@ -145,6 +165,7 @@ export const botToolsSchema = z.object({
   webSearch: webSearchToolConfigSchema.default({}),
   claudeCode: claudeCodeToolConfigSchema.default({}),
   discordPush: discordPushToolConfigSchema.default({}),
+  claudeThread: claudeThreadToolConfigSchema.default({}),
 });
 export type BotTools = z.infer<typeof botToolsSchema>;
 
@@ -159,6 +180,7 @@ export const botToolsPartialSchema = z.object({
   webSearch: webSearchToolConfigSchema.partial().optional(),
   claudeCode: claudeCodeToolConfigSchema.partial().optional(),
   discordPush: discordPushToolConfigSchema.partial().optional(),
+  claudeThread: claudeThreadToolConfigSchema.partial().optional(),
 });
 export type BotToolsPartial = z.infer<typeof botToolsPartialSchema>;
 
@@ -306,6 +328,8 @@ export const observEventTypeSchema = z.enum([
   'ask_question',       // AskUserQuestion 反问及收集到的答案
   'mention',            // Inter-Agent 协作：一次跨 bot 转交（forwarded/received/paused_*/denied/not_found…）
   'schedule_trigger',   // 调度器/手动触发的一次合成回合开始（Phase 3.5）
+  'thread_session_start',// Claude 帖直通：一次直通回合开始/续接（input: threadId/claudeSessionId/resume）
+  'thread_reset',       // Claude 帖直通：帖内重开 session（input: 旧→新 session、交接文档路径）
   'error',              // 运行错误
   'rate_limit',         // 订阅限流事件
 ]);

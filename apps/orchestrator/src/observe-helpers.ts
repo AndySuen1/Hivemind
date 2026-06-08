@@ -16,9 +16,11 @@ export function sessionMetaFromMessage(msg: Message): {
     'name' in ch && typeof (ch as { name?: unknown }).name === 'string'
       ? (ch as { name: string }).name
       : undefined;
+  // isThread 是 best-effort 探测（真实 discord.js channel 必有；防御桩对象/未来类型缺失）。
+  const isThread = typeof (ch as { isThread?: unknown }).isThread === 'function' && (ch as { isThread(): boolean }).isThread();
   return {
     channelId: ch.id,
-    channelType: ch.isDMBased() ? 'dm' : 'guild',
+    channelType: ch.isDMBased() ? 'dm' : isThread ? 'thread' : 'guild',
     channelName,
     guildId: msg.guildId ?? undefined,
   };

@@ -1,12 +1,27 @@
 // 委派核心：用 @anthropic-ai/claude-agent-sdk 的 query() 在工作目录内驱动一个 Claude 子进程，
 // 把过程实时反映到 Discord（编辑同一条状态消息），权限/反问交给 permission-relay 中转，
 // 并管理 sessionId 以支持 resume。走本机订阅鉴权（不传 API key）。
+//
+// mode-agnostic 的「组装 options / AbortController·超时 / 跑 query / 泵 SDKMessage 流」核心已抽到
+// delegation-core.ts（与 Claude 帖直通共享）；本文件 = 「状态摘要渲染器(StatusEditSink)」薄封装。
 
-import { query, type Options, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createPermissionHandler } from './permission-relay.js';
 import { editStatus, sendStatus } from './discord-ui.js';
-import type { SendableChannels } from 'discord.js';
+import type { Message, SendableChannels } from 'discord.js';
 import { recorder } from '../recorder.js';
+import {
+  buildClaudeOptions,
+  pumpQuery,
+  toolLabel,
+  wireAbort,
+  type ClaudeStreamSink,
+  type ClaudeToolUse,
+} from './delegation-core.js';
+
+// 共享 block 解析对外仍从本文件导出（p3-smoke 等历史引用），实现已搬到 delegation-core。
+export { extractAssistant } from './delegation-core.js';
+export type { ClaudeToolUse } from './delegation-core.js';
 
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000; // 单个权限按钮 5 分钟
 const QUESTION_TIMEOUT_MS = 30 * 60 * 1000; // AskUserQuestion 30 分钟
@@ -45,34 +60,41 @@ export const sessionKey = (botId: string, channelId: string): string => `${botId
 export const getLastSession = (key: string): string | undefined => sessionStore.get(key);
 export const setLastSession = (key: string, id: string): void => void sessionStore.set(key, id);
 
-/** 工具名 → 给用户看的友好状态标签。 */
-function toolLabel(name: string): string {
-  switch (name) {
-    case 'Bash': return '🔧 执行命令';
-    case 'Write': case 'Edit': case 'MultiEdit': case 'NotebookEdit': return '✏️ 修改文件';
-    case 'Read': case 'Grep': case 'Glob': case 'LS': case 'NotebookRead': return '🔎 阅读代码';
-    case 'WebFetch': case 'WebSearch': return '🌐 联网查询';
-    case 'AskUserQuestion': return '❓ 向你提问';
-    case 'Task': return '🤖 调度子任务';
-    default: return `🔧 ${name}`;
-  }
-}
+/** 状态摘要渲染器：把 Claude 的进度节流编辑进同一条状态消息，并把每个 tool_use 记成 delegate_step。 */
+class StatusEditSink implements ClaudeStreamSink {
+  private lastEditAt = 0;
+  private stepCount = 0;
+  constructor(
+    private readonly statusMsg: Message,
+    private readonly botName: string,
+    private readonly obs: { runId: string; sessionId: string; botId: string; parentEventId?: string }
+  ) {}
 
-export interface ClaudeToolUse {
-  name: string;
-  input: unknown;
-}
-
-export function extractAssistant(content: unknown): { text: string; toolUses: ClaudeToolUse[] } {
-  const blocks = Array.isArray(content) ? content : [];
-  let text = '';
-  const toolUses: ClaudeToolUse[] = [];
-  for (const b of blocks) {
-    const blk = (b ?? {}) as { type?: string; text?: string; name?: string; input?: unknown };
-    if (blk.type === 'text' && typeof blk.text === 'string') text += blk.text;
-    else if (blk.type === 'tool_use' && typeof blk.name === 'string') toolUses.push({ name: blk.name, input: blk.input });
+  private async updateStatus(line: string): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastEditAt < STATUS_THROTTLE_MS) return;
+    this.lastEditAt = now;
+    await editStatus(this.statusMsg, `🤖 **${this.botName}** ▸ Claude Code 工作中（第 ${this.stepCount} 步）\n${line}`);
   }
-  return { text, toolUses };
+
+  async onAssistant(_text: string, toolUses: ClaudeToolUse[]): Promise<void> {
+    for (const tu of toolUses) {
+      this.stepCount++;
+      await this.updateStatus(`${toolLabel(tu.name)}…`);
+      // 委派步：Claude 的每个 tool_use 都记一条，挂在 delegate_start 下（UI 默认折叠）。
+      recorder.recordEvent({
+        runId: this.obs.runId,
+        sessionId: this.obs.sessionId,
+        botId: this.obs.botId,
+        type: 'delegate_step',
+        toolName: tu.name,
+        label: toolLabel(tu.name),
+        status: 'ok',
+        input: tu.input,
+        parentEventId: this.obs.parentEventId,
+      });
+    }
+  }
 }
 
 export async function runDelegation(params: {
@@ -84,38 +106,13 @@ export async function runDelegation(params: {
 }): Promise<DelegationOutcome> {
   const { task, cwd, resumeSessionId, ctx, config } = params;
 
-  // 本次委派的 AbortController：上层 signal、挂钟超时任一触发都中止子进程与待处理的 Discord 交互
-  const ac = new AbortController();
-  const onUpstreamAbort = (): void => ac.abort();
-  if (ctx.signal.aborted) ac.abort();
-  else ctx.signal.addEventListener('abort', onUpstreamAbort, { once: true });
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    ac.abort();
-  }, config.timeoutMs);
+  // AbortController + 挂钟超时（上层 signal / 超时任一触发都中止）
+  const abort = wireAbort(ctx.signal, config.timeoutMs);
 
   const statusMsg = await sendStatus(
     ctx.channel,
     `🤖 **${ctx.botName}** 已把任务委派给 Claude Code，正在处理…${resumeSessionId ? '（续上次会话）' : ''}`
   );
-
-  let lastEditAt = 0;
-  let stepCount = 0;
-  const updateStatus = async (line: string): Promise<void> => {
-    const now = Date.now();
-    if (now - lastEditAt < STATUS_THROTTLE_MS) return;
-    lastEditAt = now;
-    await editStatus(statusMsg, `🤖 **${ctx.botName}** ▸ Claude Code 工作中（第 ${stepCount} 步）\n${line}`);
-  };
-
-  // 子进程产出的状态（在 recordEnd 闭包里引用，故先声明）
-  let sessionId: string | undefined;
-  let finalText = '';
-  let isError = false;
-  let numTurns: number | undefined;
-  let costUsd: number | undefined;
-  let rateLimited = false;
 
   // 可观测性：本回合 runId/sessionId（缺省=空串，recorder 会按外键 fail-safe 跳过，不记委派事件）。
   const obsRunId = ctx.runId ?? '';
@@ -133,7 +130,13 @@ export async function runDelegation(params: {
       input: { task, cwd, resume: !!resumeSessionId },
     }) || undefined;
 
-  // 收尾事件（每个 return 分支前调一次）；numTurns/costUsd/rateLimited/sessionId 取闭包内最终值。
+  const obs = { runId: obsRunId, sessionId: obsSessionId, botId: ctx.botId, parentEventId };
+
+  // 收尾事件（每个 return 分支前调一次）。
+  let sessionId: string | undefined;
+  let numTurns: number | undefined;
+  let costUsd: number | undefined;
+  let rateLimited = false;
   const recordEnd = (status: string, summary: string): void => {
     recorder.recordEvent({
       runId: obsRunId,
@@ -152,96 +155,46 @@ export async function runDelegation(params: {
     botName: ctx.botName,
     requesterId: ctx.requesterId,
     channel: ctx.channel,
-    signal: ac.signal,
+    signal: abort.ac.signal,
     permissionTimeoutMs: PERMISSION_TIMEOUT_MS,
     questionTimeoutMs: QUESTION_TIMEOUT_MS,
-    observe: obsRunId ? { runId: obsRunId, sessionId: obsSessionId, botId: ctx.botId, parentEventId } : undefined,
+    observe: obsRunId ? obs : undefined,
   });
 
-  const options: Options = {
+  const options = buildClaudeOptions({
     cwd,
-    abortController: ac,
+    abortController: abort.ac,
     canUseTool: handler,
     maxTurns: config.maxTurns,
-    permissionMode: 'default',
-    // 隔离：不加载本机 .claude 设置（避免 bot 的 Claude 继承本项目的放行规则），权限完全由 canUseTool 决定
-    settingSources: [],
-    stderr: (d) => process.stderr.write(`[claude:${ctx.botName}] ${d}`),
-    ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-  };
+    resumeSessionId,
+    logTag: ctx.botName,
+  });
 
+  const sink = new StatusEditSink(statusMsg, ctx.botName, obs);
+
+  let finalText = '';
+  let isError = false;
   try {
-    for await (const message of query({ prompt: task, options }) as AsyncIterable<SDKMessage>) {
-      switch (message.type) {
-        case 'system':
-          if (message.subtype === 'init') {
-            sessionId = message.session_id;
-            // apiKeySource 可确认走的是 oauth（订阅）而非 api key
-            console.log(`[claude:${ctx.botName}] init session=${sessionId} auth=${message.apiKeySource} model=${message.model}`);
-          }
-          break;
-        case 'assistant': {
-          const { text, toolUses } = extractAssistant(message.message?.content);
-          if (text) finalText = text; // 末次文本即最终回答
-          for (const tu of toolUses) {
-            stepCount++;
-            await updateStatus(`${toolLabel(tu.name)}…`);
-            // 委派步：Claude 的每个 tool_use 都记一条，挂在 delegate_start 下（UI 默认折叠）。
-            recorder.recordEvent({
-              runId: obsRunId,
-              sessionId: obsSessionId,
-              botId: ctx.botId,
-              type: 'delegate_step',
-              toolName: tu.name,
-              label: toolLabel(tu.name),
-              status: 'ok',
-              input: tu.input,
-              parentEventId,
-            });
-          }
-          break;
-        }
-        case 'rate_limit_event': {
-          // 该事件在「用量信息变化」时就会推送，多数 status 为 allowed（仅进度更新）。
-          // 只有 rejected 才是真正被挡；allowed_warning 仅预警，不算限流、不标红。
-          const info = message.rate_limit_info;
-          if (info?.status === 'rejected') {
-            rateLimited = true;
-            console.warn(
-              `[claude:${ctx.botName}] 被限流 type=${info.rateLimitType} resetsAt=${info.resetsAt} overage=${info.isUsingOverage}`
-            );
-          } else if (info?.status === 'allowed_warning') {
-            console.warn(`[claude:${ctx.botName}] 用量接近上限 type=${info.rateLimitType} util=${info.utilization}`);
-          }
-          break;
-        }
-        case 'result':
-          numTurns = message.num_turns;
-          costUsd = message.total_cost_usd;
-          isError = message.is_error || message.subtype !== 'success';
-          if (message.subtype === 'success' && typeof message.result === 'string') {
-            finalText = message.result;
-          }
-          break;
-        default:
-          break;
-      }
-    }
+    const r = await pumpQuery(query({ prompt: task, options }), sink, { logTag: ctx.botName });
+    sessionId = r.sessionId;
+    finalText = r.finalText;
+    isError = r.isError;
+    numTurns = r.numTurns;
+    costUsd = r.costUsd;
+    rateLimited = r.rateLimited;
   } catch (e) {
-    clearTimeout(timer);
-    ctx.signal.removeEventListener('abort', onUpstreamAbort);
-    const msg = timedOut
+    abort.dispose();
+    const msg = abort.timedOut()
       ? `Claude 执行超时（>${Math.round(config.timeoutMs / 60000)} 分钟），已中止。`
       : ctx.signal.aborted
         ? 'Claude 任务已被取消。'
         : `Claude 执行出错：${(e as Error).message}`;
-    recordEnd(timedOut || ctx.signal.aborted ? 'aborted' : 'error', msg);
+    recordEnd(abort.timedOut() || ctx.signal.aborted ? 'aborted' : 'error', msg);
     await editStatus(statusMsg, `⚠️ ${msg}`);
     return { ok: false, summary: msg, sessionId, rateLimited };
   }
 
-  clearTimeout(timer);
-  ctx.signal.removeEventListener('abort', onUpstreamAbort);
+  abort.dispose();
 
   if (sessionId) setLastSession(sessionKey(ctx.botId, ctx.channel.id), sessionId);
 
@@ -251,8 +204,8 @@ export async function runDelegation(params: {
     rateLimited ? '⚠️限流' : null,
   ].filter(Boolean).join(' · ');
 
-  if (timedOut || ac.signal.aborted) {
-    const msg = timedOut ? `Claude 执行超时已中止（${meta}）。` : 'Claude 任务已被取消。';
+  if (abort.timedOut() || abort.ac.signal.aborted) {
+    const msg = abort.timedOut() ? `Claude 执行超时已中止（${meta}）。` : 'Claude 任务已被取消。';
     recordEnd('aborted', msg);
     await editStatus(statusMsg, `⚠️ ${msg}`);
     return { ok: false, summary: msg, sessionId, numTurns, costUsd, rateLimited };
